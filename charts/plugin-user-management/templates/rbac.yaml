@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+---
+# Cluster-wide because database namespaces are created dynamically. Read-only
+# in Kubernetes: the backend reads an instance's engine resource and operator
+# credentials, only after the Everest API confirmed the caller may access the
+# instance, and changes users inside the database itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+rules:
+  # MongoDB: the cluster's host and TLS mode, and the users/TLS Secrets it references.
+  - apiGroups: ["psmdb.percona.com"]
+    resources: ["perconaservermongodbs"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "plugin-user-management.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "plugin-user-management.fullname" . }}
+    namespace: {{ .Release.Namespace }}

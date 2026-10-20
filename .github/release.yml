@@ -1,0 +1,19 @@
+# Configures GitHub's generated release notes (the "What's Changed" PR list the
+# release workflow requests from the generate-notes API).
+changelog:
+  exclude:
+    authors:
+      - github-actions
+      - dependabot
+  categories:
+    - title: Features
+      labels:
+        - enhancement
+        - feature
+    - title: Bug Fixes
+      labels:
+        - bug
+        - fix
+    - title: Other Changes
+      labels:
+        - "*"

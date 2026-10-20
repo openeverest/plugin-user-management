@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+/dist/
+
+# Go — keep the empty embed placeholder so `go build` works without a frontend build
+backend/dist/*
+!backend/dist/main.js
+
+# Go build output
+/backend/backend
+/backend/server
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local

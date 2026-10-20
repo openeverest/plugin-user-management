@@ -1,0 +1,245 @@
+# Triggered by a vX.Y.Z (or vX.Y.Z-<suffix> pre-release) tag. Builds the frontend
+# bundle, builds and pushes a multi-arch image to GHCR, packages and pushes the
+# Helm chart, and creates a GitHub release whose notes list the merged PRs and
+# the issues closed since the previous tag.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CHART_DIR: charts/plugin-user-management
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - name: Validate tag
+        id: resolve
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$'; then
+            echo "Tag '${TAG}' is not a valid version. Use vX.Y.Z or vX.Y.Z-<suffix>."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          case "$VERSION" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  build-frontend:
+    name: Build frontend bundle
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build bundle
+        run: npm run build
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frontend-bundle
+          path: dist/main.js
+          if-no-files-found: error
+
+  build-image:
+    name: Build & push Docker image
+    needs: [version, build-frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frontend-bundle
+          path: dist/
+
+      - name: Set up QEMU (for arm64 emulation)
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # {{major}}.{{minor}} is skipped for pre-release tags by the semver type.
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.description=OpenEverest User Management plugin
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Package chart & create release
+    needs: [version, build-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+      issues: read
+      pull-requests: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history and tags to find the previous release.
+          fetch-depth: 0
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: "3.14.0"
+
+      - name: Stamp chart version and image
+        run: |
+          sed -i "s/^version:.*/version: ${VERSION}/" "$CHART_DIR/Chart.yaml"
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" "$CHART_DIR/Chart.yaml"
+          sed -i "s|^  repository:.*|  repository: ${REGISTRY}/${IMAGE_NAME}|" "$CHART_DIR/values.yaml"
+          sed -i "s/^  tag:.*/  tag: \"${VERSION}\"/" "$CHART_DIR/values.yaml"
+          cat "$CHART_DIR/Chart.yaml"
+
+      - name: Package Helm chart
+        run: |
+          mkdir -p release-artifacts
+          helm package "$CHART_DIR" --destination release-artifacts/
+
+      - name: Find previous release tag
+        id: previous
+        run: |
+          PREVIOUS=$(git describe --tags --abbrev=0 --match 'v*.*.*' "${TAG}^" 2>/dev/null || true)
+          echo "tag=${PREVIOUS}" >> "$GITHUB_OUTPUT"
+          echo "Previous release: ${PREVIOUS:-<none>}"
+
+      - name: Generate release notes
+        env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          DIGEST: ${{ needs.build-image.outputs.image-digest }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          NOTES=release-artifacts/notes.md
+
+          cat > "$NOTES" <<EOF
+          ## User Management plugin v${VERSION}
+
+          ### Image
+
+          \`\`\`
+          ${REGISTRY}/${IMAGE_NAME}:${VERSION}
+          \`\`\`
+
+          Image digest: \`${DIGEST}\`
+
+          Platforms: \`linux/amd64\`, \`linux/arm64\`
+
+          ### Install with Helm
+
+          \`\`\`bash
+          helm install plugin-user-management oci://${REGISTRY}/${OWNER}/charts/plugin-user-management \\
+            --version ${VERSION} \\
+            -n everest-system
+          \`\`\`
+
+          EOF
+
+          # Issues closed as completed between the previous tag and this one.
+          utc_time() { TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$1"; }
+          UNTIL=$(utc_time "$TAG")
+          if [ -n "$PREVIOUS_TAG" ]; then
+            WINDOW="closed:$(utc_time "$PREVIOUS_TAG")..${UNTIL}"
+          else
+            WINDOW="closed:<=${UNTIL}"
+          fi
+          ISSUES=$(gh issue list --repo "$REPO" --state closed --limit 500 \
+            --search "reason:completed ${WINDOW}" \
+            --json number,title --jq '.[] | "- \(.title) (#\(.number))"')
+          if [ -n "$ISSUES" ]; then
+            printf '## Closed issues\n\n%s\n\n' "$ISSUES" >> "$NOTES"
+          fi
+
+          # Merged PRs, categorised by .github/release.yml (same generator the providers use).
+          ARGS=(-f "tag_name=${TAG}")
+          if [ -n "$PREVIOUS_TAG" ]; then
+            ARGS+=(-f "previous_tag_name=${PREVIOUS_TAG}")
+          fi
+          gh api "repos/${REPO}/releases/generate-notes" "${ARGS[@]}" --jq .body >> "$NOTES"
+
+          cat "$NOTES"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: v${{ needs.version.outputs.version }}
+          body_path: release-artifacts/notes.md
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          files: release-artifacts/plugin-user-management-*.tgz
+          fail_on_unmatched_files: true
+
+      - name: Push Helm chart to GHCR OCI registry
+        run: |
+          echo "${GH_TOKEN}" | helm registry login "${REGISTRY}" \
+            --username "${GITHUB_ACTOR}" \
+            --password-stdin
+          helm push release-artifacts/plugin-user-management-*.tgz \
+            "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER}/charts"

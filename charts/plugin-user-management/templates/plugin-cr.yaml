@@ -1,0 +1,26 @@
+apiVersion: extensions.openeverest.io/v1alpha1
+kind: Plugin
+metadata:
+  # Cluster-scoped singleton keyed by the plugin id; must not follow the release name.
+  name: {{ .Chart.Name }}
+spec:
+  displayName: {{ .Values.plugin.displayName | quote }}
+  description: {{ .Values.plugin.description | quote }}
+  version: {{ .Chart.AppVersion | quote }}
+  vendor: {{ .Values.plugin.vendor | quote }}
+  enabled: {{ .Values.plugin.enabled }}
+  compatibleUiContractVersions: {{ .Values.plugin.compatibleUiContractVersions | quote }}
+  backend:
+    serviceRef:
+      namespace: {{ .Release.Namespace }}
+      name: {{ include "plugin-user-management.fullname" . }}
+      port: {{ .Values.service.port }}
+  frontend:
+    bundlePath: {{ .Values.plugin.bundlePath | quote }}
+    extensionPoints:
+      {{- toYaml .Values.plugin.extensionPoints | nindent 6 }}
+  permissions:
+    - verb: read
+      resource: database-clusters
+    - verb: read-connection
+      resource: database-clusters
