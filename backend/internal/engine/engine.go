@@ -1,5 +1,6 @@
 // Package engine defines the database-agnostic contract the plugin uses to
-// manage users of an instance. Each supported provider implements Engine.
+// reconcile DatabaseUsers into an instance's database. Each supported
+// provider implements Engine.
 package engine
 
 import (
@@ -30,35 +31,28 @@ type RoleGrant struct {
 	Database string `json:"database,omitempty"`
 }
 
-// User is a database user.
+// User is a user as it exists in the database.
 type User struct {
-	// ID identifies the user within the instance; opaque to callers.
-	ID       string `json:"id"`
 	Username string `json:"username"`
 	// Database is the database the user authenticates against, if the engine has one.
 	Database string      `json:"database,omitempty"`
 	Roles    []RoleGrant `json:"roles"`
-	// System users are created and used by the operator; changing them would break the instance.
+	// System users are created and used by the operator.
 	System bool `json:"system"`
-	// Manageable users can be changed through the plugin: they are not system
-	// users and hold only roles the plugin can grant, so editing them can't
-	// strip or hand out privileges the plugin doesn't manage.
-	Manageable bool `json:"manageable"`
 }
 
-// NewUser is a user to create.
-type NewUser struct {
+// SecretKeyRef points to a key of a Secret in the instance's namespace.
+type SecretKeyRef struct {
+	Name string
+	Key  string
+}
+
+// DesiredUser is a user the plugin manages, as declared by a DatabaseUser.
+type DesiredUser struct {
 	Username string
-	Password string
+	// Roles as returned by NormalizeRoles.
 	Roles    []RoleGrant
-}
-
-// Credentials are returned once, right after a user is created or its password is reset.
-type Credentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	// URI connects to the instance as the user from inside the Kubernetes cluster.
-	URI string `json:"uri"`
+	Password SecretKeyRef
 }
 
 // Target is the instance whose users are managed.
@@ -67,26 +61,52 @@ type Target struct {
 	Instance  string
 }
 
-// Engine manages the users of instances of one provider.
+// Engine reconciles the users of instances of one provider.
 type Engine interface {
 	// Roles lists the roles the plugin can grant.
 	Roles() []Role
+	// NormalizeRoles validates grants against Roles and returns them in the
+	// form ListUsers reports them, so the two can be compared.
+	NormalizeRoles(grants []RoleGrant) ([]RoleGrant, error)
+	// SyncUsers declares the complete set of users the plugin manages on the
+	// instance; users dropped from the set are no longer managed but are not
+	// removed from the database (see DropUser).
+	SyncUsers(ctx context.Context, target Target, users []DesiredUser) error
+	// ListUsers reads the users that exist in the database.
 	ListUsers(ctx context.Context, target Target) ([]User, error)
-	CreateUser(ctx context.Context, target Target, user NewUser) (Credentials, error)
-	UpdateRoles(ctx context.Context, target Target, id string, roles []RoleGrant) error
-	ResetPassword(ctx context.Context, target Target, id, password string) (Credentials, error)
-	DeleteUser(ctx context.Context, target Target, id string) error
+	// AuthDatabase is the database managed users authenticate against, as
+	// reported in User.Database; empty for engines without one.
+	AuthDatabase() string
+	// DropUser removes a user that is no longer declared. A missing user is not an error.
+	DropUser(ctx context.Context, target Target, username string) error
+	// ConnectionURI returns a URI that connects to the instance as the user
+	// from inside the Kubernetes cluster.
+	ConnectionURI(ctx context.Context, target Target, username, password string) (string, error)
 }
 
 var (
-	// ErrInvalid wraps errors caused by invalid input.
-	ErrInvalid = errors.New("invalid request")
-	// ErrNotFound means the user does not exist.
-	ErrNotFound = errors.New("user not found")
-	// ErrConflict means the user already exists.
-	ErrConflict = errors.New("user already exists")
-	// ErrNotManageable means the user can't be changed through the plugin.
-	ErrNotManageable = errors.New("user can't be managed through the plugin")
-	// ErrNotReady means the instance can't be reached yet.
+	// ErrInvalid wraps errors caused by an invalid user declaration.
+	ErrInvalid = errors.New("invalid user")
+	// ErrNotReady means the instance's database can't be reached yet.
 	ErrNotReady = errors.New("instance is not ready")
 )
+
+// SameRoles reports whether two normalized grant lists hold the same grants.
+func SameRoles(a, b []RoleGrant) bool {
+	set := map[RoleGrant]int{}
+	for _, g := range a {
+		set[g] = 1
+	}
+	for _, g := range b {
+		if set[g] == 0 {
+			return false
+		}
+		set[g] = 2
+	}
+	for _, v := range set {
+		if v != 2 {
+			return false
+		}
+	}
+	return true
+}

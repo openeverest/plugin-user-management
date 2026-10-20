@@ -40,7 +40,7 @@ export const UsersTab = ({ namespace, instanceName }: UsersTabProps) => {
     );
   }
 
-  const { users, roles, canManage } = data;
+  const { users, roles, canManage, databaseError } = data;
   return (
     <Stack sx={{ gap: 2, mt: 2 }}>
       <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
@@ -64,6 +64,7 @@ export const UsersTab = ({ namespace, instanceName }: UsersTabProps) => {
         </Tooltip>
       </Stack>
       {!canManage && <Alert severity="info">{Messages.readOnly}</Alert>}
+      {databaseError && <Alert severity="warning">{Messages.databaseError(databaseError)}</Alert>}
       {!users.some((u) => !u.system) && <Alert severity="info">{Messages.noUsers}</Alert>}
       <UsersTable
         users={users}

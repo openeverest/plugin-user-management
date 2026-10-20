@@ -22,10 +22,14 @@ export const CredentialsDialog = ({ title, credentials, onClose }: CredentialsDi
     <DialogTitle>{title}</DialogTitle>
     <DialogContent>
       <Stack sx={{ gap: 2, pt: 1 }}>
-        <Alert severity="warning">{Messages.shownOnce}</Alert>
+        <Alert severity="info">{Messages.storedIn(credentials.secret)}</Alert>
         <CopyField label={Messages.username} value={credentials.username} />
         <CopyField label={Messages.password} value={credentials.password} />
-        <CopyField label={Messages.uri} value={credentials.uri} />
+        {credentials.uri ? (
+          <CopyField label={Messages.uri} value={credentials.uri} />
+        ) : (
+          <Alert severity="warning">{Messages.pendingUri}</Alert>
+        )}
       </Stack>
     </DialogContent>
     <DialogActions>

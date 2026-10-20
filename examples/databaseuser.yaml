@@ -1,0 +1,20 @@
+# A database user for the orders service on the mongo-users instance.
+# The plugin generates its password into the Secret orders-service-credentials
+# (keys: username, password, uri), which the application can mount.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: orders-service
+  namespace: um-test
+spec:
+  instanceRef:
+    name: mongo-users
+  username: orders_svc
+  roles:
+    - role: readWrite
+      database: orders
+    - role: clusterMonitor # cluster-scoped: no database
+  # To bring your own password (e.g. from an external secret store) instead:
+  # passwordSecretRef:
+  #   name: orders-svc-password
+  #   key: password

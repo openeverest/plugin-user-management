@@ -6,48 +6,24 @@ import (
 	"reflect"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 )
 
 type fakeSession struct {
 	users   []dbUser
-	created []dbUser
-	updated []string
+	dropErr error
 	dropped []string
-	pwd     map[string]string
-	err     error
 	closed  bool
 }
 
 func (f *fakeSession) usersInfo(context.Context) ([]dbUser, error) { return f.users, nil }
 
-func (f *fakeSession) createUser(_ context.Context, db, user, password string, roles []mongoRole) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.created = append(f.created, dbUser{ID: db + "." + user, User: user, DB: db, Roles: roles})
-	f.pwd = map[string]string{user: password}
-	return nil
-}
-
-func (f *fakeSession) updateUser(_ context.Context, db, user, password string, roles []mongoRole) error {
-	f.updated = append(f.updated, db+"."+user)
-	if password != "" {
-		f.pwd = map[string]string{user: password}
-	}
-	if roles != nil {
-		for i := range f.users {
-			if f.users[i].DB == db && f.users[i].User == user {
-				f.users[i].Roles = roles
-			}
-		}
-	}
-	return nil
-}
-
 func (f *fakeSession) dropUser(_ context.Context, db, user string) error {
 	f.dropped = append(f.dropped, db+"."+user)
-	return nil
+	return f.dropErr
 }
 
 func (f *fakeSession) close(context.Context) { f.closed = true }
@@ -56,180 +32,169 @@ var testCluster = cluster{
 	host:        "mongo-rs0.ns.svc.cluster.local:27017",
 	adminUser:   "userAdmin",
 	adminPass:   "secret",
-	systemUsers: map[string]bool{"userAdmin": true, "clusterMonitor": true, "databaseAdmin": true},
-}
-
-func newTestEngine(s *fakeSession, c cluster) *Engine {
-	return &Engine{
-		resolve: func(context.Context, engine.Target) (cluster, error) { return c, nil },
-		dial:    func(context.Context, cluster) (session, error) { return s, nil },
-	}
+	systemUsers: map[string]bool{"userAdmin": true, "clusterMonitor": true},
 }
 
 var target = engine.Target{Namespace: "ns", Instance: "mongo"}
 
-func seededSession() *fakeSession {
-	return &fakeSession{users: []dbUser{
-		{ID: "admin.clusterMonitor", User: "clusterMonitor", DB: "admin", Roles: []mongoRole{{Role: "clusterMonitor", DB: "admin"}}},
-		{ID: "admin.app", User: "app", DB: "admin", Roles: []mongoRole{{Role: "readWrite", DB: "shop"}, {Role: "readAnyDatabase", DB: "admin"}}},
-		{ID: "admin.boss", User: "boss", DB: "admin", Roles: []mongoRole{{Role: "root", DB: "admin"}}},
-		{ID: "shop.legacy", User: "legacy", DB: "shop", Roles: []mongoRole{{Role: "read", DB: "shop"}}},
-		{ID: "admin.sneaky", User: "sneaky", DB: "admin", Roles: []mongoRole{{Role: "dbOwner", DB: "admin"}}},
+type recorder struct{ applied [][]psmdbUser }
+
+func newTestEngine(s *fakeSession, c cluster) (*Engine, *recorder) {
+	rec := &recorder{}
+	return &Engine{
+		resolve: func(context.Context, engine.Target) (cluster, error) { return c, nil },
+		dial:    func(context.Context, cluster) (session, error) { return s, nil },
+		applyUsers: func(_ context.Context, _ engine.Target, users []psmdbUser) error {
+			rec.applied = append(rec.applied, users)
+			return nil
+		},
+	}, rec
+}
+
+func TestNormalizeRoles(t *testing.T) {
+	e, _ := newTestEngine(&fakeSession{}, testCluster)
+	got, err := e.NormalizeRoles([]engine.RoleGrant{
+		{Role: "readWrite", Database: "shop"},
+		{Role: "readWrite", Database: "shop"},
+		{Role: "clusterMonitor", Database: "ignored"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []engine.RoleGrant{{Role: "readWrite", Database: "shop"}, {Role: "clusterMonitor"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized = %+v, want %+v", got, want)
+	}
+
+	for name, grants := range map[string][]engine.RoleGrant{
+		"none":              nil,
+		"ungrantable role":  {{Role: "root"}},
+		"reserved database": {{Role: "dbOwner", Database: "admin"}},
+		"missing database":  {{Role: "read"}},
+		"invalid database":  {{Role: "read", Database: "a.b"}},
+	} {
+		if _, err := e.NormalizeRoles(grants); !errors.Is(err, engine.ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+}
+
+func TestSyncUsersDeclaresOperatorUsers(t *testing.T) {
+	e, rec := newTestEngine(&fakeSession{}, testCluster)
+	err := e.SyncUsers(context.Background(), target, []engine.DesiredUser{{
+		Username: "app",
+		Roles:    []engine.RoleGrant{{Role: "readWrite", Database: "shop"}, {Role: "readAnyDatabase"}},
+		Password: engine.SecretKeyRef{Name: "app-credentials", Key: "password"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []psmdbUser{{
+		Name:              "app",
+		DB:                "admin",
+		PasswordSecretRef: psmdbSecretRef{Name: "app-credentials", Key: "password"},
+		Roles:             []psmdbRole{{Name: "readWrite", DB: "shop"}, {Name: "readAnyDatabase", DB: "admin"}},
 	}}
+	if len(rec.applied) != 1 || !reflect.DeepEqual(rec.applied[0], want) {
+		t.Fatalf("applied = %+v, want %+v", rec.applied, want)
+	}
+
+	if err := e.SyncUsers(context.Background(), target, []engine.DesiredUser{{Username: "x", Roles: []engine.RoleGrant{{Role: "root"}}}}); !errors.Is(err, engine.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	if len(rec.applied) != 1 {
+		t.Fatal("applied invalid users")
+	}
+}
+
+func TestUsersApplyConfiguration(t *testing.T) {
+	obj, err := usersApplyConfiguration(target, []psmdbUser{{Name: "app", DB: "admin", Roles: []psmdbRole{{Name: "read", DB: "shop"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj.GetName() != "mongo" || obj.GetNamespace() != "ns" || obj.GetKind() != "PerconaServerMongoDB" || obj.GetAPIVersion() != "psmdb.percona.com/v1" {
+		t.Errorf("object identity = %s %s %s/%s", obj.GetAPIVersion(), obj.GetKind(), obj.GetNamespace(), obj.GetName())
+	}
+	users, _, _ := unstructured.NestedSlice(obj.Object, "spec", "users")
+	if len(users) != 1 || users[0].(map[string]any)["name"] != "app" {
+		t.Errorf("users = %+v", users)
+	}
+	if len(obj.Object) != 4 {
+		t.Errorf("apply configuration must only carry identity and spec.users: %+v", obj.Object)
+	}
+
+	empty, err := usersApplyConfiguration(target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedSlice(empty.Object, "spec", "users"); found {
+		t.Error("no users must release spec.users rather than set it")
+	}
+}
+
+func TestApplyUsersRequiresExistingCluster(t *testing.T) {
+	err := newResolver([]runtime.Object{}).applyUsers(context.Background(), target, nil)
+	if !errors.Is(err, engine.ErrNotReady) {
+		t.Fatalf("err = %v, want ErrNotReady", err)
+	}
 }
 
 func TestListUsers(t *testing.T) {
-	s := seededSession()
-	users, err := newTestEngine(s, testCluster).ListUsers(context.Background(), target)
+	s := &fakeSession{users: []dbUser{
+		{User: "clusterMonitor", DB: "admin", Roles: []mongoRole{{Role: "clusterMonitor", DB: "admin"}}},
+		{User: "app", DB: "admin", Roles: []mongoRole{{Role: "readWrite", DB: "shop"}, {Role: "readAnyDatabase", DB: "admin"}}},
+		{User: "clusterMonitor", DB: "shop", Roles: []mongoRole{{Role: "read", DB: "shop"}}},
+	}}
+	e, _ := newTestEngine(s, testCluster)
+	users, err := e.ListUsers(context.Background(), target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !s.closed {
 		t.Error("session not closed")
 	}
-
-	type summary struct {
-		id         string
-		system     bool
-		manageable bool
+	want := []engine.User{
+		{Username: "clusterMonitor", Database: "admin", Roles: []engine.RoleGrant{{Role: "clusterMonitor"}}, System: true},
+		{Username: "app", Database: "admin", Roles: []engine.RoleGrant{{Role: "readWrite", Database: "shop"}, {Role: "readAnyDatabase"}}},
+		// Same name in another database isn't the operator's user.
+		{Username: "clusterMonitor", Database: "shop", Roles: []engine.RoleGrant{{Role: "read", Database: "shop"}}},
 	}
-	var got []summary
-	for _, u := range users {
-		got = append(got, summary{u.ID, u.System, u.Manageable})
-	}
-	want := []summary{
-		{"admin.app", false, true},
-		{"admin.boss", false, false},   // root isn't grantable
-		{"admin.sneaky", false, false}, // dbOwner on admin isn't grantable
-		{"shop.legacy", false, true},
-		{"admin.clusterMonitor", true, false},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("users = %+v, want %+v", got, want)
-	}
-
-	wantRoles := []engine.RoleGrant{{Role: "readWrite", Database: "shop"}, {Role: "readAnyDatabase"}}
-	if !reflect.DeepEqual(users[0].Roles, wantRoles) {
-		t.Errorf("roles = %+v, want %+v", users[0].Roles, wantRoles)
+	if !reflect.DeepEqual(users, want) {
+		t.Fatalf("users = %+v, want %+v", users, want)
 	}
 }
 
-func TestCreateUser(t *testing.T) {
-	s := seededSession()
-	creds, err := newTestEngine(s, testCluster).CreateUser(context.Background(), target, engine.NewUser{
-		Username: "reporting",
-		Password: "p@ss word",
-		Roles:    []engine.RoleGrant{{Role: "read", Database: "shop"}, {Role: "read", Database: "shop"}, {Role: "clusterMonitor", Database: "ignored"}},
-	})
+func TestDropUser(t *testing.T) {
+	s := &fakeSession{dropErr: errUserNotFound}
+	e, _ := newTestEngine(s, testCluster)
+	if err := e.DropUser(context.Background(), target, "app"); err != nil {
+		t.Fatalf("missing user: err = %v", err)
+	}
+	if !reflect.DeepEqual(s.dropped, []string{"admin.app"}) {
+		t.Errorf("dropped = %v", s.dropped)
+	}
+
+	s.dropErr = errors.New("boom")
+	if err := e.DropUser(context.Background(), target, "app"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestConnectionURI(t *testing.T) {
+	e, _ := newTestEngine(&fakeSession{}, testCluster)
+	uri, err := e.ConnectionURI(context.Background(), target, "app", "p@ss word")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := dbUser{ID: "admin.reporting", User: "reporting", DB: "admin", Roles: []mongoRole{{Role: "read", DB: "shop"}, {Role: "clusterMonitor", DB: "admin"}}}
-	if len(s.created) != 1 || !reflect.DeepEqual(s.created[0], want) {
-		t.Fatalf("created = %+v, want %+v", s.created, want)
+	if want := "mongodb://app:p%40ss%20word@mongo-rs0.ns.svc.cluster.local:27017/?authSource=admin"; uri != want {
+		t.Errorf("uri = %s, want %s", uri, want)
 	}
-	wantURI := "mongodb://reporting:p%40ss%20word@mongo-rs0.ns.svc.cluster.local:27017/?authSource=admin"
-	if creds.URI != wantURI || creds.Password != "p@ss word" || creds.Username != "reporting" {
-		t.Errorf("credentials = %+v, want URI %s", creds, wantURI)
-	}
-}
 
-func TestCreateUserTLSURI(t *testing.T) {
 	c := testCluster
 	c.requireTLS = true
-	creds, err := newTestEngine(seededSession(), c).CreateUser(context.Background(), target, engine.NewUser{
-		Username: "u", Password: "password", Roles: []engine.RoleGrant{{Role: "readAnyDatabase"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "mongodb://u:password@mongo-rs0.ns.svc.cluster.local:27017/?authSource=admin&tls=true"; creds.URI != want {
-		t.Errorf("URI = %s, want %s", creds.URI, want)
-	}
-}
-
-func TestCreateUserRejects(t *testing.T) {
-	cases := map[string]struct {
-		user engine.NewUser
-		want error
-	}{
-		"bad username":         {engine.NewUser{Username: "-x", Roles: []engine.RoleGrant{{Role: "read", Database: "a"}}}, engine.ErrInvalid},
-		"no roles":             {engine.NewUser{Username: "x"}, engine.ErrInvalid},
-		"ungrantable role":     {engine.NewUser{Username: "x", Roles: []engine.RoleGrant{{Role: "root"}}}, engine.ErrInvalid},
-		"reserved database":    {engine.NewUser{Username: "x", Roles: []engine.RoleGrant{{Role: "dbOwner", Database: "admin"}}}, engine.ErrInvalid},
-		"missing database":     {engine.NewUser{Username: "x", Roles: []engine.RoleGrant{{Role: "read"}}}, engine.ErrInvalid},
-		"invalid database":     {engine.NewUser{Username: "x", Roles: []engine.RoleGrant{{Role: "read", Database: "a.b"}}}, engine.ErrInvalid},
-		"operator system user": {engine.NewUser{Username: "userAdmin", Roles: []engine.RoleGrant{{Role: "read", Database: "a"}}}, engine.ErrConflict},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			s := seededSession()
-			_, err := newTestEngine(s, testCluster).CreateUser(context.Background(), target, tc.user)
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("err = %v, want %v", err, tc.want)
-			}
-			if len(s.created) != 0 {
-				t.Fatalf("user created: %+v", s.created)
-			}
-		})
-	}
-}
-
-func TestChangesOnlyManageableUsers(t *testing.T) {
-	ctx := context.Background()
-	for id, want := range map[string]error{
-		"admin.app":            nil,
-		"shop.legacy":          nil,
-		"admin.boss":           engine.ErrNotManageable,
-		"admin.clusterMonitor": engine.ErrNotManageable,
-		"admin.missing":        engine.ErrNotFound,
-		"nodot":                engine.ErrNotFound,
-	} {
-		t.Run(id, func(t *testing.T) {
-			s := seededSession()
-			e := newTestEngine(s, testCluster)
-
-			if err := e.UpdateRoles(ctx, target, id, []engine.RoleGrant{{Role: "read", Database: "x"}}); !errors.Is(err, want) {
-				t.Errorf("UpdateRoles err = %v, want %v", err, want)
-			}
-			if _, err := e.ResetPassword(ctx, target, id, "newpassword"); !errors.Is(err, want) {
-				t.Errorf("ResetPassword err = %v, want %v", err, want)
-			}
-			if err := e.DeleteUser(ctx, target, id); !errors.Is(err, want) {
-				t.Errorf("DeleteUser err = %v, want %v", err, want)
-			}
-			changed := len(s.updated) + len(s.dropped)
-			if want == nil && changed != 3 {
-				t.Errorf("expected 2 updates and 1 drop, got updated=%v dropped=%v", s.updated, s.dropped)
-			}
-			if want != nil && changed != 0 {
-				t.Errorf("unexpected changes: updated=%v dropped=%v", s.updated, s.dropped)
-			}
-		})
-	}
-}
-
-func TestResetPasswordUsesUserAuthDatabase(t *testing.T) {
-	s := seededSession()
-	creds, err := newTestEngine(s, testCluster).ResetPassword(context.Background(), target, "shop.legacy", "newpassword")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.pwd["legacy"] != "newpassword" {
-		t.Errorf("password not updated: %v", s.pwd)
-	}
-	if want := "mongodb://legacy:newpassword@mongo-rs0.ns.svc.cluster.local:27017/?authSource=shop"; creds.URI != want {
-		t.Errorf("URI = %s, want %s", creds.URI, want)
-	}
-}
-
-func TestUpdateRolesReplacesRoles(t *testing.T) {
-	s := seededSession()
-	err := newTestEngine(s, testCluster).UpdateRoles(context.Background(), target, "admin.app", []engine.RoleGrant{{Role: "dbAdmin", Database: "shop"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := s.users[1].Roles; !reflect.DeepEqual(got, []mongoRole{{Role: "dbAdmin", DB: "shop"}}) {
-		t.Errorf("roles = %+v", got)
+	e, _ = newTestEngine(&fakeSession{}, c)
+	uri, _ = e.ConnectionURI(context.Background(), target, "app", "password")
+	if want := "mongodb://app:password@mongo-rs0.ns.svc.cluster.local:27017/?authSource=admin&tls=true"; uri != want {
+		t.Errorf("uri = %s, want %s", uri, want)
 	}
 }

@@ -71,6 +71,15 @@ export const resetUserPassword = async (
   return response.json();
 };
 
+export const getUserCredentials = async (
+  pluginFetch: PluginFetch,
+  target: InstanceTarget,
+  id: string
+): Promise<Credentials> => {
+  const response = await request(pluginFetch, userPath(id, target, '/credentials'));
+  return response.json();
+};
+
 export const deleteUser = async (
   pluginFetch: PluginFetch,
   target: InstanceTarget,

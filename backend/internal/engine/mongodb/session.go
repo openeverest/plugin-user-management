@@ -11,16 +11,14 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-
-	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 )
 
 const (
-	connectTimeout = 10 * time.Second
-	// MongoDB error codes.
+	connectTimeout   = 10 * time.Second
 	codeUserNotFound = 11
-	codeDuplicateKey = 51003
 )
+
+var errUserNotFound = errors.New("user not found")
 
 // dbUser is a user as returned by usersInfo.
 type dbUser struct {
@@ -33,9 +31,6 @@ type dbUser struct {
 // session runs user administration commands on a cluster.
 type session interface {
 	usersInfo(ctx context.Context) ([]dbUser, error)
-	createUser(ctx context.Context, db, user, password string, roles []mongoRole) error
-	// updateUser leaves the password unchanged when empty and the roles when nil.
-	updateUser(ctx context.Context, db, user, password string, roles []mongoRole) error
 	dropUser(ctx context.Context, db, user string) error
 	close(ctx context.Context)
 }
@@ -75,11 +70,8 @@ func (s *driverSession) run(ctx context.Context, db string, cmd bson.D) error {
 	err := s.client.Database(db).RunCommand(ctx, cmd).Err()
 	var cmdErr mongo.CommandError
 	if errors.As(err, &cmdErr) {
-		switch cmdErr.Code {
-		case codeUserNotFound:
-			return engine.ErrNotFound
-		case codeDuplicateKey:
-			return engine.ErrConflict
+		if cmdErr.Code == codeUserNotFound {
+			return errUserNotFound
 		}
 	}
 	return err
@@ -94,25 +86,6 @@ func (s *driverSession) usersInfo(ctx context.Context) ([]dbUser, error) {
 		return nil, fmt.Errorf("usersInfo: %w", err)
 	}
 	return out.Users, nil
-}
-
-func (s *driverSession) createUser(ctx context.Context, db, user, password string, roles []mongoRole) error {
-	return s.run(ctx, db, bson.D{
-		{Key: "createUser", Value: user},
-		{Key: "pwd", Value: password},
-		{Key: "roles", Value: roles},
-	})
-}
-
-func (s *driverSession) updateUser(ctx context.Context, db, user, password string, roles []mongoRole) error {
-	cmd := bson.D{{Key: "updateUser", Value: user}}
-	if password != "" {
-		cmd = append(cmd, bson.E{Key: "pwd", Value: password})
-	}
-	if roles != nil {
-		cmd = append(cmd, bson.E{Key: "roles", Value: roles})
-	}
-	return s.run(ctx, db, cmd)
 }
 
 func (s *driverSession) dropUser(ctx context.Context, db, user string) error {

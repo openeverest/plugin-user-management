@@ -24,6 +24,15 @@ test: ## Run backend and frontend tests.
 	cd backend && go test ./...
 	npm test
 
+CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
+$(CONTROLLER_GEN):
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.18.0
+
+.PHONY: generate
+generate: $(CONTROLLER_GEN) ## Generate DeepCopy code and the DatabaseUser CRD from backend/api.
+	cd backend && $(CONTROLLER_GEN) object:headerFile=../hack/boilerplate.go.txt paths=./api/...
+	cd backend && $(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=../charts/plugin-user-management/crds
+
 .PHONY: lint
 lint: ## Vet the backend and lint the Helm chart.
 	cd backend && go vet ./...
@@ -51,5 +60,7 @@ dev-deploy: build-frontend $(CRANE) ## Build the image, push it to the dev regis
 	kubectl -n dev-registry port-forward svc/registry $(DEV_REGISTRY_LOCAL_PORT):5000 >/dev/null & PF=$$!; \
 		trap "kill $$PF" EXIT; sleep 3; \
 		$(CRANE) push --insecure $(DEV_IMAGE_TAR) localhost:$(DEV_REGISTRY_LOCAL_PORT)/plugin-user-management:$(DEV_TAG)
+	# Helm installs CRDs from crds/ but never upgrades them.
+	kubectl apply --server-side -f charts/plugin-user-management/crds
 	helm upgrade --install plugin-user-management charts/plugin-user-management -n everest-system \
 		--set image.repository=localhost:5000/plugin-user-management --set image.tag=$(DEV_TAG) --wait

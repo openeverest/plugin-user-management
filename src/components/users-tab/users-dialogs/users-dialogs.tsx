@@ -11,6 +11,7 @@ import {
 import { Credentials, InstanceTarget, Role } from 'types/users.types';
 import { UsersDialogState } from '../users-tab.types';
 import { Messages } from '../users-tab.messages';
+import { StoredCredentialsDialog } from './stored-credentials-dialog/stored-credentials-dialog';
 
 interface UsersDialogsProps {
   target: InstanceTarget;
@@ -80,6 +81,8 @@ export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsPro
           }
         />
       );
+    case 'showCredentials':
+      return <StoredCredentialsDialog target={target} user={dialog.user} onClose={close} />;
     case 'resetPassword':
       return (
         <ConfirmDialog

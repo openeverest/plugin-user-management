@@ -39,6 +39,10 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.port | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- if .Values.everestAPIURL }}
             - name: EVEREST_API_URL
               value: {{ .Values.everestAPIURL | quote }}
