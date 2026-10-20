@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "plugin-user-management.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      protocol: TCP

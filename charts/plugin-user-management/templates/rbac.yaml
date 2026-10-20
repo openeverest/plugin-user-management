@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+---
+# Cluster-wide because database namespaces are created dynamically.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+rules:
+  # The plugin's own API: declared users, reconciled by the backend.
+  - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
+    resources: ["databaseusers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
+    resources: ["databaseusers/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
+    resources: ["databaseusers/finalizers"]
+    verbs: ["update"]
+  # Generated passwords, the operator's user admin credentials and TLS CA.
+  # list/watch feed an informer restricted to the plugin's own credentials
+  # Secrets (by label); other Secrets are only ever read one by one.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The Instance a user belongs to: its provider and UID for owner references.
+  - apiGroups: ["core.openeverest.io"]
+    resources: ["instances"]
+    verbs: ["get"]
+  # MongoDB: users are declared in spec.users (server-side apply under the
+  # plugin's own field manager); host and TLS mode are read from it.
+  - apiGroups: ["psmdb.percona.com"]
+    resources: ["perconaservermongodbs"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "plugin-user-management.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "plugin-user-management.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election, so only one replica reconciles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "plugin-user-management.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "plugin-user-management.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "plugin-user-management.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "plugin-user-management.fullname" . }}
+    namespace: {{ .Release.Namespace }}

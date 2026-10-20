@@ -1,0 +1,6 @@
+apiVersion: v2
+name: plugin-user-management
+description: OpenEverest plugin for managing database users and their roles
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

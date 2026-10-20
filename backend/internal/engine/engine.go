@@ -1,0 +1,112 @@
+// Package engine defines the database-agnostic contract the plugin uses to
+// reconcile DatabaseUsers into an instance's database. Each supported
+// provider implements Engine.
+package engine
+
+import (
+	"context"
+	"errors"
+)
+
+// RoleScope tells where a role is granted.
+type RoleScope string
+
+const (
+	// ScopeDatabase roles are granted on one database the user picks.
+	ScopeDatabase RoleScope = "database"
+	// ScopeCluster roles apply to the whole instance.
+	ScopeCluster RoleScope = "cluster"
+)
+
+// Role is a role users can be granted through the plugin.
+type Role struct {
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Scope       RoleScope `json:"scope"`
+}
+
+// RoleGrant is a role granted to a user, on a database for ScopeDatabase roles.
+type RoleGrant struct {
+	Role     string `json:"role"`
+	Database string `json:"database,omitempty"`
+}
+
+// User is a user as it exists in the database.
+type User struct {
+	Username string `json:"username"`
+	// Database is the database the user authenticates against, if the engine has one.
+	Database string      `json:"database,omitempty"`
+	Roles    []RoleGrant `json:"roles"`
+	// System users are created and used by the operator.
+	System bool `json:"system"`
+}
+
+// SecretKeyRef points to a key of a Secret in the instance's namespace.
+type SecretKeyRef struct {
+	Name string
+	Key  string
+}
+
+// DesiredUser is a user the plugin manages, as declared by a DatabaseUser.
+type DesiredUser struct {
+	Username string
+	// Roles as returned by NormalizeRoles.
+	Roles    []RoleGrant
+	Password SecretKeyRef
+}
+
+// Target is the instance whose users are managed.
+type Target struct {
+	Namespace string
+	Instance  string
+}
+
+// Engine reconciles the users of instances of one provider.
+type Engine interface {
+	// Roles lists the roles the plugin can grant.
+	Roles() []Role
+	// NormalizeRoles validates grants against Roles and returns them in the
+	// form ListUsers reports them, so the two can be compared.
+	NormalizeRoles(grants []RoleGrant) ([]RoleGrant, error)
+	// SyncUsers declares the complete set of users the plugin manages on the
+	// instance; users dropped from the set are no longer managed but are not
+	// removed from the database (see DropUser).
+	SyncUsers(ctx context.Context, target Target, users []DesiredUser) error
+	// ListUsers reads the users that exist in the database.
+	ListUsers(ctx context.Context, target Target) ([]User, error)
+	// AuthDatabase is the database managed users authenticate against, as
+	// reported in User.Database; empty for engines without one.
+	AuthDatabase() string
+	// DropUser removes a user that is no longer declared. A missing user is not an error.
+	DropUser(ctx context.Context, target Target, username string) error
+	// ConnectionURI returns a URI that connects to the instance as the user
+	// from inside the Kubernetes cluster.
+	ConnectionURI(ctx context.Context, target Target, username, password string) (string, error)
+}
+
+var (
+	// ErrInvalid wraps errors caused by an invalid user declaration.
+	ErrInvalid = errors.New("invalid user")
+	// ErrNotReady means the instance's database can't be reached yet.
+	ErrNotReady = errors.New("instance is not ready")
+)
+
+// SameRoles reports whether two normalized grant lists hold the same grants.
+func SameRoles(a, b []RoleGrant) bool {
+	set := map[RoleGrant]int{}
+	for _, g := range a {
+		set[g] = 1
+	}
+	for _, g := range b {
+		if set[g] == 0 {
+			return false
+		}
+		set[g] = 2
+	}
+	for _, v := range set {
+		if v != 2 {
+			return false
+		}
+	}
+	return true
+}

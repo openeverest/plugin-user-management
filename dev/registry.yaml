@@ -1,0 +1,79 @@
+# A throwaway image registry for testing the plugin on a remote cluster
+# without pushing to a public registry. Not for production: no auth, no TLS,
+# images live in an emptyDir.
+#
+# The registry runs behind a ClusterIP Service; a hostNetwork DaemonSet
+# exposes it on 127.0.0.1:5000 of every node, so the container runtime pulls
+# localhost:5000/<image> over plain HTTP (allowed for localhost) without any
+# node configuration. `make dev-deploy` pushes to it through a port-forward.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev-registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: dev-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: registry}
+  template:
+    metadata:
+      labels: {app: registry}
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: dev-registry
+spec:
+  selector: {app: registry}
+  ports:
+    - port: 5000
+      targetPort: 5000
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: registry-node-proxy
+  namespace: dev-registry
+spec:
+  selector:
+    matchLabels: {app: registry-node-proxy}
+  template:
+    metadata:
+      labels: {app: registry-node-proxy}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: socat
+          image: alpine/socat:latest
+          args:
+            - TCP-LISTEN:5000,bind=127.0.0.1,fork,reuseaddr
+            - TCP:registry.dev-registry.svc.cluster.local:5000
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
