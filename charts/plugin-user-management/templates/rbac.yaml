@@ -39,6 +39,16 @@ rules:
   - apiGroups: ["psmdb.percona.com"]
     resources: ["perconaservermongodbs"]
     verbs: ["get", "patch"]
+  # CloudNativePG: each user is a DatabaseRole (server-side apply), deleted to
+  # drop the user; DatabaseRoles declared outside the plugin are listed so
+  # their roles are never taken over. The Cluster gives the endpoint, CA,
+  # reserved roles and the DatabaseRoles' owner.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["databaseroles"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

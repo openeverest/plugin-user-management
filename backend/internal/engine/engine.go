@@ -68,16 +68,22 @@ type Engine interface {
 	// NormalizeRoles validates grants against Roles and returns them in the
 	// form ListUsers reports them, so the two can be compared.
 	NormalizeRoles(grants []RoleGrant) ([]RoleGrant, error)
+	// ValidateUser rejects, with ErrInvalid, a user the engine can't declare
+	// whatever its roles: a reserved or too long username, an unusable
+	// password Secret key.
+	ValidateUser(user DesiredUser) error
 	// SyncUsers declares the complete set of users the plugin manages on the
-	// instance; users dropped from the set are no longer managed but are not
-	// removed from the database (see DropUser).
+	// instance. Users dropped from the set are not removed from the database
+	// (see DropUser): they stop being managed, or keep their last declaration.
 	SyncUsers(ctx context.Context, target Target, users []DesiredUser) error
 	// ListUsers reads the users that exist in the database.
 	ListUsers(ctx context.Context, target Target) ([]User, error)
 	// AuthDatabase is the database managed users authenticate against, as
 	// reported in User.Database; empty for engines without one.
 	AuthDatabase() string
-	// DropUser removes a user that is no longer declared. A missing user is not an error.
+	// DropUser removes a user that is no longer declared. A missing user is
+	// not an error. ErrInProgress means the removal was started and DropUser
+	// must be called again until it returns nil.
 	DropUser(ctx context.Context, target Target, username string) error
 	// ConnectionURI returns a URI that connects to the instance as the user
 	// from inside the Kubernetes cluster.
@@ -89,7 +95,17 @@ var (
 	ErrInvalid = errors.New("invalid user")
 	// ErrNotReady means the instance's database can't be reached yet.
 	ErrNotReady = errors.New("instance is not ready")
+	// ErrInProgress means the operator is still carrying out a change.
+	ErrInProgress = errors.New("in progress")
 )
+
+// PendingReasoner is implemented by engines whose operator reports why a
+// declared user isn't applied yet.
+type PendingReasoner interface {
+	// PendingReason explains why the user isn't applied, or returns "" when
+	// the operator reports no problem.
+	PendingReason(ctx context.Context, target Target, username string) string
+}
 
 // SameRoles reports whether two normalized grant lists hold the same grants.
 func SameRoles(a, b []RoleGrant) bool {

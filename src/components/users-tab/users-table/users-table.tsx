@@ -27,55 +27,62 @@ interface UsersTableProps {
 
 const rowKey = (user: DbUser) => user.id ?? `${user.database}.${user.username}`;
 
-export const UsersTable = ({ users, canManage, onAction }: UsersTableProps) => (
-  <TableContainer component={Paper} variant="outlined">
-    <Table size="small">
-      <TableHead>
-        <TableRow>
-          <TableCell>{Messages.columns.username}</TableCell>
-          <TableCell>{Messages.columns.authDatabase}</TableCell>
-          <TableCell>{Messages.columns.roles}</TableCell>
-          <TableCell>{Messages.columns.status}</TableCell>
-          <TableCell align="right">{Messages.columns.actions}</TableCell>
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {users.map((user) => (
-          <TableRow key={rowKey(user)} hover>
-            <TableCell>
-              <Stack direction="row" sx={{ gap: 1, alignItems: 'center' }}>
-                <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                  {user.username}
-                </Typography>
-                <UserBadge user={user} />
-              </Stack>
-            </TableCell>
-            <TableCell>{user.database}</TableCell>
-            <TableCell>
-              <Stack direction="row" sx={{ gap: 0.5, flexWrap: 'wrap' }}>
-                {user.roles.map((grant) => (
-                  <Chip
-                    key={formatRoleGrant(grant)}
-                    size="small"
-                    variant="outlined"
-                    label={formatRoleGrant(grant)}
-                  />
-                ))}
-              </Stack>
-            </TableCell>
-            <TableCell>{user.phase && <UserStatus phase={user.phase} message={user.message} />}</TableCell>
-            <TableCell align="right">
-              {isManaged(user) && (
-                <UserActionsMenu
-                  user={user}
-                  actions={availableActions(user, canManage)}
-                  onAction={onAction}
-                />
-              )}
-            </TableCell>
+export const UsersTable = ({ users, canManage, onAction }: UsersTableProps) => {
+  // Engines whose users belong to the whole instance (PostgreSQL) report no auth database.
+  const showAuthDatabase = users.some((user) => user.database);
+
+  return (
+    <TableContainer component={Paper} variant="outlined">
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            <TableCell>{Messages.columns.username}</TableCell>
+            {showAuthDatabase && <TableCell>{Messages.columns.authDatabase}</TableCell>}
+            <TableCell>{Messages.columns.roles}</TableCell>
+            <TableCell>{Messages.columns.status}</TableCell>
+            <TableCell align="right">{Messages.columns.actions}</TableCell>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  </TableContainer>
-);
+        </TableHead>
+        <TableBody>
+          {users.map((user) => (
+            <TableRow key={rowKey(user)} hover>
+              <TableCell>
+                <Stack direction="row" sx={{ gap: 1, alignItems: 'center' }}>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    {user.username}
+                  </Typography>
+                  <UserBadge user={user} />
+                </Stack>
+              </TableCell>
+              {showAuthDatabase && <TableCell>{user.database}</TableCell>}
+              <TableCell>
+                <Stack direction="row" sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                  {user.roles.map((grant) => (
+                    <Chip
+                      key={formatRoleGrant(grant)}
+                      size="small"
+                      variant="outlined"
+                      label={formatRoleGrant(grant)}
+                    />
+                  ))}
+                </Stack>
+              </TableCell>
+              <TableCell>
+                {user.phase && <UserStatus phase={user.phase} message={user.message} />}
+              </TableCell>
+              <TableCell align="right">
+                {isManaged(user) && (
+                  <UserActionsMenu
+                    user={user}
+                    actions={availableActions(user, canManage)}
+                    onAction={onAction}
+                  />
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
+};

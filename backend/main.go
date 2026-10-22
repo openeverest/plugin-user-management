@@ -34,6 +34,7 @@ import (
 	"github.com/openeverest/plugin-user-management/backend/api/v1alpha1"
 	"github.com/openeverest/plugin-user-management/backend/internal/controller"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/cnpg"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/mongodb"
 )
 
@@ -166,6 +167,7 @@ func main() {
 	}
 	engines := map[string]engine.Engine{
 		mongodb.ProviderName: mongodb.New(kube, dyn),
+		cnpg.ProviderName:    cnpg.New(kube, dyn),
 	}
 
 	mgr, err := newManager(cfg)

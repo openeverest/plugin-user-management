@@ -51,6 +51,13 @@ func (f *fakeEngine) NormalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGra
 	return out, nil
 }
 
+func (f *fakeEngine) ValidateUser(user engine.DesiredUser) error {
+	if user.Username == "reserved" {
+		return errors.Join(engine.ErrInvalid, errors.New("user is reserved"))
+	}
+	return nil
+}
+
 func (f *fakeEngine) SyncUsers(context.Context, engine.Target, []engine.DesiredUser) error {
 	return nil
 }
@@ -263,6 +270,7 @@ func TestCreateUserRejects(t *testing.T) {
 		"bad username":        {`{"username":"-x","roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
 		"short password":      {`{"username":"x","password":"short","roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
 		"ungrantable role":    {`{"username":"x","roles":[{"role":"root"}]}`, http.StatusBadRequest},
+		"reserved username":   {`{"username":"reserved","roles":[{"role":"readAnyDatabase"}]}`, http.StatusBadRequest},
 		"already declared":    {`{"username":"app","roles":[{"role":"read","database":"a"}]}`, http.StatusConflict},
 		"exists in database":  {`{"username":"boss","roles":[{"role":"read","database":"a"}]}`, http.StatusConflict},
 		"unknown body fields": {`{"username":"x","roles":[],"extra":1}`, http.StatusBadRequest},
