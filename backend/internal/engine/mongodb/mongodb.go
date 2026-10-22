@@ -57,6 +57,12 @@ func (e *Engine) NormalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, 
 	return normalized, nil
 }
 
+// ValidateUser implements engine.Engine. The DatabaseUser username pattern
+// already fits MongoDB, and the operator reads any password key.
+func (e *Engine) ValidateUser(engine.DesiredUser) error {
+	return nil
+}
+
 // SyncUsers implements engine.Engine. Users are created in the admin
 // database, which is where MongoDB clients authenticate by default.
 func (e *Engine) SyncUsers(ctx context.Context, target engine.Target, users []engine.DesiredUser) error {

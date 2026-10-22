@@ -191,6 +191,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			continue
 		}
 		s.roles = roles
+		if err := eng.ValidateUser(engine.DesiredUser{Username: u.Spec.Username, Roles: roles, Password: s.password}); err != nil {
+			s.fail(err.Error())
+			continue
+		}
 		if usernames[u.Spec.Username] {
 			s.fail(fmt.Sprintf("another DatabaseUser already declares user %q on this instance", u.Spec.Username))
 			continue
@@ -267,13 +271,22 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 		if dbUser, found := existing[s.user.Spec.Username]; found && engine.SameRoles(dbUser.Roles, s.roles) {
 			s.phase = v1alpha1.PhaseReady
 		} else {
-			s.pending("waiting for the operator to apply the user")
+			s.pending(pendingMessage(ctx, eng, target, s.user.Spec.Username))
 		}
 	}
 
+	var result ctrl.Result
 	for _, u := range deleting {
 		if u.Status.Declared && !usernameDeclared(desired, u.Spec.Username) {
-			if err := eng.DropUser(ctx, target, u.Spec.Username); err != nil {
+			err := eng.DropUser(ctx, target, u.Spec.Username)
+			if errors.Is(err, engine.ErrInProgress) {
+				if err := r.writeStatus(ctx, &userState{user: u, declared: true, phase: v1alpha1.PhaseDeleting, message: err.Error()}); err != nil {
+					return ctrl.Result{}, err
+				}
+				result.RequeueAfter = pendingRequeue
+				continue
+			}
+			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("drop user %q: %w", u.Spec.Username, err)
 			}
 			log.FromContext(ctx).Info("dropped database user", "user", u.Spec.Username, "databaseUser", u.Name)
@@ -282,7 +295,18 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 			return ctrl.Result{}, err
 		}
 	}
-	return ctrl.Result{}, nil
+	return result, nil
+}
+
+// pendingMessage tells why a declared user isn't applied, with the
+// operator's reason when the engine reports one.
+func pendingMessage(ctx context.Context, eng engine.Engine, target engine.Target, username string) string {
+	if reasoner, ok := eng.(engine.PendingReasoner); ok {
+		if reason := reasoner.PendingReason(ctx, target, username); reason != "" {
+			return reason
+		}
+	}
+	return "waiting for the operator to apply the user"
 }
 
 func usernameDeclared(users []engine.DesiredUser, username string) bool {

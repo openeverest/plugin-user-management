@@ -259,7 +259,10 @@ func managedView(eng engine.Engine, u *v1alpha1.DatabaseUser) userView {
 		v.Phase = v1alpha1.PhasePending
 	}
 	if !u.DeletionTimestamp.IsZero() {
-		v.Phase, v.Message = v1alpha1.PhaseDeleting, ""
+		v.Phase = v1alpha1.PhaseDeleting
+		if u.Status.Phase != v1alpha1.PhaseDeleting {
+			v.Message = ""
+		}
 	}
 	return v
 }
@@ -341,6 +344,10 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	roles, err := a.engine.NormalizeRoles(req.Roles)
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := a.engine.ValidateUser(engine.DesiredUser{Username: req.Username, Roles: roles}); err != nil {
 		writeError(w, err)
 		return
 	}

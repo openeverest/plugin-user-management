@@ -15,6 +15,7 @@ Supported providers:
 | Provider | Engine |
 |---|---|
 | `percona-server-mongodb` | Percona Server for MongoDB, through the operator's `spec.users` |
+| `provider-cloudnative-pg` | CloudNativePG 1.30+, through the operator's `DatabaseRole` resource |
 
 ## DatabaseUser
 
@@ -51,7 +52,9 @@ status:
   `plugin-user-management.plugins.openeverest.io/drop-user`). DatabaseUsers
   are owned by their Instance, so deleting the instance deletes them.
 
-See [examples/databaseuser.yaml](examples/databaseuser.yaml).
+See [examples/databaseuser.yaml](examples/databaseuser.yaml) (MongoDB) and
+[examples/databaseuser-postgresql.yaml](examples/databaseuser-postgresql.yaml)
+(CloudNativePG).
 
 ## How it works
 
@@ -100,6 +103,44 @@ what it depends on (the operator's resources, Secrets).
   database; `readAnyDatabase`, `readWriteAnyDatabase`, `dbAdminAnyDatabase`,
   `clusterMonitor` on all databases.
 
+### CloudNativePG engine
+
+- Declares each user as a CloudNativePG `DatabaseRole` named
+  `<instance>-<username>-<hash>`, owned by the `Cluster` (named after the
+  Instance) and labeled with the instance. The role can log in, is a member of
+  the granted roles (`inRoles`) and takes its password from the user's
+  Secret. The operator creates the role, grants and revokes memberships and
+  applies password changes.
+- The plugin labels password Secrets `cnpg.io/reload: "true"` so password
+  changes apply right away. CloudNativePG reads the `password` key and checks
+  that the Secret's `username` key matches the user: generated Secrets have
+  both; a `passwordSecretRef` must use the `password` key and also hold
+  `username`.
+- `DatabaseRole`s use the `retain` reclaim policy, so deleting one by hand
+  keeps the role. To drop a user the controller switches its `DatabaseRole`
+  to `delete` and deletes it. The DatabaseUser stays `Deleting` until the
+  operator has dropped the role; if the role still owns objects, PostgreSQL
+  refuses and the operator's error is shown until they're reassigned or
+  dropped.
+- Reads roles and memberships from `pg_roles` over TLS, verified against the
+  cluster's CA, as the application owner (`<cluster>-app`), or the superuser
+  when that's the only Secret. When a declared user isn't applied, the
+  `DatabaseRole`'s error is reported in the DatabaseUser's status.
+- `postgres`, `streaming_replica`, `cnpg_*`, the application owner and roles
+  in the Cluster's `spec.managed.roles` are listed as system users. Roles
+  declared by other `DatabaseRole`s are listed too, even before they exist, so
+  the plugin never declares the same role.
+- Grantable roles are PostgreSQL's predefined roles, which apply to all
+  databases: `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`.
+  CloudNativePG declares memberships but not object privileges, so there are
+  no per-database roles yet. Usernames are at most 63 characters and can't be
+  `postgres`, `streaming_replica` or start with `pg_` or `cnpg_`.
+- The connection string points at the read-write service and the
+  application database, with `sslmode=require`.
+- The operator applies a `DatabaseRole` when it or its Secret changes; it
+  doesn't revert changes made to the role in SQL. Such drift shows up as
+  `Pending` until the user's roles or password change again.
+
 ### Adding an engine
 
 An engine implements one provider ([backend/internal/engine/engine.go](backend/internal/engine/engine.go)):
@@ -108,13 +149,18 @@ An engine implements one provider ([backend/internal/engine/engine.go](backend/i
 type Engine interface {
     Roles() []Role                                   // the roles the plugin can grant
     NormalizeRoles([]RoleGrant) ([]RoleGrant, error) // validate against Roles
+    ValidateUser(DesiredUser) error                  // engine rules for usernames and password Secrets
     SyncUsers(ctx, target, []DesiredUser) error      // declare all managed users
     ListUsers(ctx, target) ([]User, error)           // users in the database
     AuthDatabase() string
-    DropUser(ctx, target, username) error
+    DropUser(ctx, target, username) error            // ErrInProgress until the user is gone
     ConnectionURI(ctx, target, username, password) (string, error)
 }
 ```
+
+Engines whose operator reports per-user errors can also implement
+`PendingReasoner`, to explain in the DatabaseUser's status why a user isn't
+applied yet.
 
 Engines are keyed by provider name (Instance `spec.providerRef.name`) in
 [backend/main.go](backend/main.go). Prefer declaring users through the
@@ -139,7 +185,8 @@ The controller enforces these rules whichever way a DatabaseUser is created:
 
 - **Only a curated set of roles can be granted.** Roles that reach user or
   cluster administration of the whole instance (MongoDB `root`,
-  `userAdminAnyDatabase`, `clusterAdmin`, `backup`/`restore`, ...) are
+  `userAdminAnyDatabase`, `clusterAdmin`, `backup`/`restore`, ...; PostgreSQL
+  superuser, `createrole`, `replication`, server file and program access) are
   rejected, and database-scoped roles can't target the `admin`, `config` or
   `local` databases.
 - **No takeover of existing accounts.** A DatabaseUser whose username
@@ -170,14 +217,19 @@ kubectl apply --server-side -f charts/plugin-user-management/crds
 
 | Value | Default | Description |
 |---|---|---|
-| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb]` | Providers that get the Users tab |
+| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg]` | Providers that get the Users tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
 The chart's ClusterRole lets the backend manage DatabaseUsers and Secrets,
-read Instances and get/patch `perconaservermongodbs` in every namespace
-(database namespaces are created dynamically). It caches only Secrets
-labeled `plugin-user-management.plugins.openeverest.io/instance`; the
-operator's Secrets are read one by one when needed.
+read Instances, get/patch `perconaservermongodbs`, manage CloudNativePG
+`databaseroles` and get `clusters` in every namespace (database namespaces
+are created dynamically). It caches only Secrets labeled
+`plugin-user-management.plugins.openeverest.io/instance`; the operator's
+Secrets are read one by one when needed.
+
+Because `DatabaseRole`s can declare superusers, write access to them is as
+powerful as superuser access to the clusters in their namespace. Grant users
+DatabaseUsers, not DatabaseRoles.
 
 ## API
 
@@ -218,6 +270,9 @@ make dev-registry     # throwaway in-cluster registry (dev/registry.yaml)
 make dev-deploy       # build, push to it, apply the CRD, helm upgrade --install
 kubectl create namespace um-test && kubectl apply -f dev/demo-instance.yaml
 kubectl apply -f examples/databaseuser.yaml
+# CloudNativePG, with provider-cloudnative-pg installed:
+kubectl apply -f dev/demo-instance-postgresql.yaml
+kubectl apply -f examples/databaseuser-postgresql.yaml
 ```
 
 `make dev-deploy` needs Docker and installs
@@ -237,8 +292,10 @@ GitHub release with notes.
 
 ## Roadmap
 
-- Engines for PostgreSQL (`provider-percona-postgresql`) and MySQL
-  (`percona-xtradb-cluster`), through their operators' user APIs.
-- Custom roles (MongoDB `spec.roles`) as a `DatabaseRole` resource.
+- Engines for MySQL (`percona-xtradb-cluster`) and Percona PostgreSQL
+  (`provider-percona-postgresql`), through their operators' user APIs.
+- Per-database PostgreSQL roles (read-only and read-write on one database),
+  which need privileges CloudNativePG doesn't declare.
+- Custom roles (MongoDB `spec.roles`) as a resource of their own.
 - Adopting existing database users into a DatabaseUser.
 - Configurable role catalog per installation.

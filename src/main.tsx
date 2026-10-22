@@ -6,7 +6,7 @@ import { Messages } from 'components/users-tab/users-tab.messages';
 
 const TAB_PATH = 'users';
 // Providers the backend has a user-management engine for.
-const SUPPORTED_PROVIDERS = ['percona-server-mongodb'];
+const SUPPORTED_PROVIDERS = ['percona-server-mongodb', 'provider-cloudnative-pg'];
 
 const register: PluginRegisterFn = (api) => {
   const queryClient = new QueryClient();

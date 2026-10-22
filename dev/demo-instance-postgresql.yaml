@@ -1,0 +1,22 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: pg-users
+  namespace: um-test
+spec:
+  providerRef:
+    name: provider-cloudnative-pg
+  components:
+    engine:
+      type: postgresql
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: 300m
+          memory: 1Gi
+      replicas: 1
+      storage:
+        # 10Gi is the smallest volume some clouds (e.g. Linode) provision.
+        size: 10Gi

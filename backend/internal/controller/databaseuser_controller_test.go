@@ -25,11 +25,13 @@ import (
 const ns = "ns"
 
 type fakeEngine struct {
-	dbUsers  []engine.User
-	listErr  error
-	synced   [][]engine.DesiredUser
-	dropped  []string
-	uriCalls int
+	dbUsers       []engine.User
+	listErr       error
+	dropErr       error
+	pendingReason string
+	synced        [][]engine.DesiredUser
+	dropped       []string
+	uriCalls      int
 }
 
 func (f *fakeEngine) Roles() []engine.Role { return nil }
@@ -44,6 +46,17 @@ func (f *fakeEngine) NormalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGra
 	return grants, nil
 }
 
+func (f *fakeEngine) ValidateUser(user engine.DesiredUser) error {
+	if user.Username == "reserved" {
+		return errors.Join(engine.ErrInvalid, errors.New("user \"reserved\" is reserved"))
+	}
+	return nil
+}
+
+func (f *fakeEngine) PendingReason(context.Context, engine.Target, string) string {
+	return f.pendingReason
+}
+
 func (f *fakeEngine) SyncUsers(_ context.Context, _ engine.Target, users []engine.DesiredUser) error {
 	f.synced = append(f.synced, users)
 	return nil
@@ -55,7 +68,7 @@ func (f *fakeEngine) ListUsers(context.Context, engine.Target) ([]engine.User, e
 
 func (f *fakeEngine) DropUser(_ context.Context, _ engine.Target, username string) error {
 	f.dropped = append(f.dropped, username)
-	return nil
+	return f.dropErr
 }
 
 func (f *fakeEngine) ConnectionURI(_ context.Context, _ engine.Target, username, password string) (string, error) {
@@ -217,8 +230,40 @@ func TestRolesChangeUntilApplied(t *testing.T) {
 	h := newHarness(t, instance("percona-server-mongodb"), u)
 	h.engine.dbUsers = []engine.User{{Username: "app", Database: "admin", Roles: []engine.RoleGrant{{Role: "read", Database: "shop"}}}}
 	h.reconcile()
-	if got := h.get("app").Status.Phase; got != v1alpha1.PhasePending {
-		t.Errorf("phase = %s, want Pending while roles differ", got)
+	if s := h.get("app").Status; s.Phase != v1alpha1.PhasePending || s.Message != "waiting for the operator to apply the user" {
+		t.Errorf("status = %+v, want Pending while roles differ", s)
+	}
+
+	h.engine.pendingReason = "secret has no username"
+	h.reconcile()
+	if s := h.get("app").Status; s.Phase != v1alpha1.PhasePending || s.Message != "secret has no username" {
+		t.Errorf("status = %+v, want the operator's reason", s)
+	}
+}
+
+func TestKeepsDeletingUserUntilDropped(t *testing.T) {
+	deleted := dbUser("old", "old", readShop)
+	deleted.Status.Declared = true
+	deleted.Finalizers = []string{Finalizer}
+	h := newHarness(t, instance("percona-server-mongodb"), deleted)
+	if err := h.client.Delete(context.Background(), h.get("old")); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.dropErr = errors.Join(engine.ErrInProgress, errors.New("role owns objects"))
+
+	if res := h.reconcile(); res.RequeueAfter == 0 {
+		t.Error("drop in progress must be requeued")
+	}
+	u := h.get("old")
+	if len(u.Finalizers) != 1 || u.Status.Phase != v1alpha1.PhaseDeleting || u.Status.Message != "in progress\nrole owns objects" {
+		t.Errorf("finalizers %v, status %+v", u.Finalizers, u.Status)
+	}
+
+	h.engine.dropErr = nil
+	h.reconcile()
+	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "old"}, &v1alpha1.DatabaseUser{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("DatabaseUser not released once dropped: %v", err)
 	}
 }
 
@@ -227,6 +272,7 @@ func TestRejectsTakeoverAndInvalidUsers(t *testing.T) {
 		dbUser("existing", "boss", readShop),
 		dbUser("system", "userAdmin", readShop),
 		dbUser("root", "x", v1alpha1.RoleGrant{Role: "root"}),
+		dbUser("reserved", "reserved", readShop),
 		dbUser("first", "dup", readShop),
 		dbUser("second", "dup", readShop),
 	)
@@ -239,6 +285,7 @@ func TestRejectsTakeoverAndInvalidUsers(t *testing.T) {
 	for name, want := range map[string]string{
 		"existing": `user "boss" already exists in the database and isn't managed by this DatabaseUser`,
 		"system":   `user "userAdmin" is reserved for the operator`,
+		"reserved": "invalid user\nuser \"reserved\" is reserved",
 		"second":   `another DatabaseUser already declares user "dup" on this instance`,
 	} {
 		if s := h.get(name).Status; s.Phase != v1alpha1.PhaseFailed || s.Message != want || s.Declared {

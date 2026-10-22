@@ -27,6 +27,7 @@ plugin:
       # Providers the backend has a user-management engine for.
       providers:
         - percona-server-mongodb
+        - provider-cloudnative-pg
 
 # Optional override for the Everest API URL. When empty the backend discovers
 # the everest Service via Kubernetes-injected env vars (same namespace), then

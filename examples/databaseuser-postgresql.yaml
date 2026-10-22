@@ -1,0 +1,22 @@
+# A database user for the reporting service on the pg-users CloudNativePG
+# instance. The plugin generates its password into the Secret
+# reporting-service-credentials (keys: username, password, uri), which the
+# application can mount.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: reporting-service
+  namespace: um-test
+spec:
+  instanceRef:
+    name: pg-users
+  username: reporting_svc
+  # PostgreSQL predefined roles; they apply to all databases.
+  roles:
+    - role: pg_read_all_data
+    - role: pg_monitor
+  # To bring your own password instead, the Secret needs a username key
+  # matching the user and the password under the password key:
+  # passwordSecretRef:
+  #   name: reporting-svc-password
+  #   key: password
