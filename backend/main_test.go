@@ -116,12 +116,37 @@ func newTestEnv(t *testing.T, provider string, instanceStatus, connectionStatus 
 		}).
 		Build()
 	eng := &fakeEngine{}
+	var registered engine.Engine = eng
+	if provider == keyProvider {
+		registered = &fakeKeyEngine{eng}
+	}
 	s := &server{
 		everest: newEverestClient(fakeEverest(t, provider, instanceStatus, connectionStatus).URL),
 		kube:    kube,
-		engines: map[string]engine.Engine{"percona-server-mongodb": eng},
+		engines: map[string]engine.Engine{"percona-server-mongodb": eng, keyProvider: registered},
 	}
 	return &testEnv{t: t, kube: kube, engine: eng, h: newMux(s)}
+}
+
+const keyProvider = "provider-kserve"
+
+// fakeKeyEngine is an engine whose users authenticate with API keys and
+// need a model name to connect.
+type fakeKeyEngine struct{ *fakeEngine }
+
+func (f *fakeKeyEngine) GenerateKey() (string, error) {
+	return "oe_sk_generated-key-0123456789abcdef", nil
+}
+
+func (f *fakeKeyEngine) ValidateKey(key string) error {
+	if len(key) < 32 {
+		return errors.New("API keys must be at least 32 characters long")
+	}
+	return nil
+}
+
+func (f *fakeKeyEngine) ConnectionProperties(context.Context, engine.Target) (map[string]string, error) {
+	return map[string]string{"model": "qwen3-4b"}, nil
 }
 
 func (e *testEnv) do(method, target, body string) *httptest.ResponseRecorder {
@@ -411,5 +436,47 @@ func TestUserResourceName(t *testing.T) {
 	long := userResourceName(strings.Repeat("i", 63), strings.Repeat("u", 64)+"@"+strings.Repeat("v", 200))
 	if len(long)+len("-credentials") > 253 {
 		t.Errorf("name too long: %d", len(long))
+	}
+}
+
+func TestAPIKeyEngine(t *testing.T) {
+	env := newTestEnv(t, keyProvider, http.StatusOK, http.StatusOK)
+
+	var list usersResponse
+	rec := env.do(http.MethodGet, "/api/users"+testQuery, "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.CredentialKind != engine.CredentialAPIKey {
+		t.Fatalf("credentialKind = %q", list.CredentialKind)
+	}
+
+	// API keys are always generated.
+	if rec := env.do(http.MethodPost, "/api/users"+testQuery, `{"username":"app","password":"oe_sk_chosen-key-0123456789abcdefghijk","roles":[{"role":"readAnyDatabase"}]}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("chosen key: status = %d: %s", rec.Code, rec.Body)
+	}
+
+	rec = env.do(http.MethodPost, "/api/users"+testQuery, `{"username":"app","roles":[{"role":"readAnyDatabase"}]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	var creds credentialsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &creds); err != nil {
+		t.Fatal(err)
+	}
+	if creds.Password != "oe_sk_generated-key-0123456789abcdef" || creds.Properties["model"] != "qwen3-4b" {
+		t.Fatalf("creds = %+v", creds)
+	}
+	if got := string(env.secret(creds.Secret).Data["model"]); got != "qwen3-4b" {
+		t.Fatalf("secret model = %q", got)
+	}
+
+	rec = env.do(http.MethodGet, "/api/users/"+creds.ID+"/credentials"+testQuery, "")
+	var shown credentialsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &shown); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || shown.Properties["model"] != "qwen3-4b" || len(shown.Properties) != 1 {
+		t.Fatalf("status = %d, credentials = %+v", rec.Code, shown)
 	}
 }

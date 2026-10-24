@@ -11,6 +11,7 @@ import {
 import { Credentials, InstanceTarget, Role } from 'types/users.types';
 import { UsersDialogState } from '../users-tab.types';
 import { Messages } from '../users-tab.messages';
+import { useTerms } from 'components/terms-context/terms.context';
 import { StoredCredentialsDialog } from './stored-credentials-dialog/stored-credentials-dialog';
 
 interface UsersDialogsProps {
@@ -27,6 +28,7 @@ interface ShownCredentials {
 
 export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsProps) => {
   const [shown, setShown] = useState<ShownCredentials | null>(null);
+  const terms = useTerms();
   const createUser = useCreateUser(target);
   const updateRoles = useUpdateUserRoles(target);
   const resetPassword = useResetUserPassword(target);
@@ -59,7 +61,7 @@ export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsPro
           onSubmit={(user) =>
             createUser.mutate(user, {
               onSuccess: (credentials) => {
-                setShown({ title: Messages.createdTitle(credentials.username), credentials });
+                setShown({ title: terms.createdTitle(credentials.username), credentials });
                 close();
               },
             })
@@ -86,21 +88,21 @@ export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsPro
     case 'resetPassword':
       return (
         <ConfirmDialog
-          title={Messages.resetPasswordTitle}
-          confirmLabel={Messages.resetPasswordConfirm}
+          title={terms.resetPasswordTitle}
+          confirmLabel={terms.resetPassword}
           isSubmitting={resetPassword.isPending}
           error={resetPassword.error?.message}
           onClose={close}
           onConfirm={() =>
             resetPassword.mutate(dialog.user.id, {
               onSuccess: (credentials) => {
-                setShown({ title: Messages.passwordResetTitle(credentials.username), credentials });
+                setShown({ title: terms.passwordResetTitle(credentials.username), credentials });
                 close();
               },
             })
           }
         >
-          {Messages.resetPasswordBody(dialog.user.username)}
+          {terms.resetPasswordBody(dialog.user.username)}
         </ConfirmDialog>
       );
     case 'delete':
@@ -114,7 +116,7 @@ export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsPro
           onClose={close}
           onConfirm={() => deleteUser.mutate(dialog.user.id, { onSuccess: close })}
         >
-          {Messages.deleteBody(dialog.user.username)}
+          {terms.deleteBody(dialog.user.username)}
         </ConfirmDialog>
       );
     default:

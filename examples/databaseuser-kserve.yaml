@@ -1,0 +1,23 @@
+# An API key for the chat application on the qwen-small model, served by
+# provider-kserve through the Envoy AI Gateway. The plugin generates the key
+# into the Secret chat-app-credentials (keys: username, password = the API
+# key, uri = the Gateway's OpenAI base URL, model), which the application can
+# mount, and allows the key to call the model.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: chat-app
+  namespace: default
+spec:
+  instanceRef:
+    name: qwen-small
+  # The key's owner: an application, team or person. A label value: at most 63
+  # letters, digits, '-', '_' or '.'.
+  username: chat-app
+  roles:
+    - role: invoke
+  # To bring your own key instead (32 to 128 printable characters, not used by
+  # any other key):
+  # passwordSecretRef:
+  #   name: chat-app-key
+  #   key: password

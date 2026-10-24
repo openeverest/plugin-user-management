@@ -18,6 +18,7 @@ import { availableActions, isManaged } from '../users-tab.utils';
 import { Messages } from '../users-tab.messages';
 import { UserBadge } from './user-badge/user-badge';
 import { UserStatus } from './user-status/user-status';
+import { useTerms } from 'components/terms-context/terms.context';
 
 interface UsersTableProps {
   users: DbUser[];
@@ -30,13 +31,14 @@ const rowKey = (user: DbUser) => user.id ?? `${user.database}.${user.username}`;
 export const UsersTable = ({ users, canManage, onAction }: UsersTableProps) => {
   // Engines whose users belong to the whole instance (PostgreSQL) report no auth database.
   const showAuthDatabase = users.some((user) => user.database);
+  const terms = useTerms();
 
   return (
     <TableContainer component={Paper} variant="outlined">
       <Table size="small">
         <TableHead>
           <TableRow>
-            <TableCell>{Messages.columns.username}</TableCell>
+            <TableCell>{terms.username}</TableCell>
             {showAuthDatabase && <TableCell>{Messages.columns.authDatabase}</TableCell>}
             <TableCell>{Messages.columns.roles}</TableCell>
             <TableCell>{Messages.columns.status}</TableCell>

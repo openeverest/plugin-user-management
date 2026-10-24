@@ -6,6 +6,8 @@ package engine
 import (
 	"context"
 	"errors"
+
+	"github.com/openeverest/plugin-user-management/backend/internal/password"
 )
 
 // RoleScope tells where a role is granted.
@@ -105,6 +107,71 @@ type PendingReasoner interface {
 	// PendingReason explains why the user isn't applied, or returns "" when
 	// the operator reports no problem.
 	PendingReason(ctx context.Context, target Target, username string) string
+}
+
+// CredentialKind tells how users of an engine authenticate.
+type CredentialKind string
+
+const (
+	// CredentialPassword is a database password.
+	CredentialPassword CredentialKind = "password"
+	// CredentialAPIKey is an API key, sent with every request.
+	CredentialAPIKey CredentialKind = "apiKey"
+)
+
+// APIKeyEngine is implemented by engines whose users authenticate with API
+// keys instead of passwords. The plugin keeps the key where it keeps
+// passwords, but generates and validates it with the engine's rules.
+type APIKeyEngine interface {
+	GenerateKey() (string, error)
+	ValidateKey(key string) error
+}
+
+// ConnectionPropertiesProvider is implemented by engines whose clients need
+// more than a username, password and URI, e.g. the name of a model. The
+// properties are added to generated credentials Secrets and responses.
+type ConnectionPropertiesProvider interface {
+	// ConnectionProperties returns the extra Secret keys and values. They
+	// never include username, password or uri.
+	ConnectionProperties(ctx context.Context, target Target) (map[string]string, error)
+}
+
+// CredentialKindOf returns how users of the engine authenticate.
+func CredentialKindOf(e Engine) CredentialKind {
+	if _, ok := e.(APIKeyEngine); ok {
+		return CredentialAPIKey
+	}
+	return CredentialPassword
+}
+
+// GeneratePassword returns a new password, or API key, for a user of the engine.
+func GeneratePassword(e Engine) (string, error) {
+	if k, ok := e.(APIKeyEngine); ok {
+		return k.GenerateKey()
+	}
+	return password.Generate()
+}
+
+// ValidatePassword checks a user-supplied password, or API key, for the engine.
+func ValidatePassword(e Engine, value string) error {
+	if k, ok := e.(APIKeyEngine); ok {
+		return k.ValidateKey(value)
+	}
+	return password.Validate(value)
+}
+
+// ConnectionProperties returns the engine's extra connection properties, or
+// nil when it has none or they aren't known yet.
+func ConnectionProperties(ctx context.Context, e Engine, target Target) map[string]string {
+	p, ok := e.(ConnectionPropertiesProvider)
+	if !ok {
+		return nil
+	}
+	props, err := p.ConnectionProperties(ctx, target)
+	if err != nil {
+		return nil
+	}
+	return props
 }
 
 // SameRoles reports whether two normalized grant lists hold the same grants.

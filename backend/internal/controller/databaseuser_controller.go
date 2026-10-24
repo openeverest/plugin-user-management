@@ -24,7 +24,6 @@ import (
 
 	"github.com/openeverest/plugin-user-management/backend/api/v1alpha1"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
-	"github.com/openeverest/plugin-user-management/backend/internal/password"
 )
 
 const (
@@ -405,7 +404,7 @@ func (r *Reconciler) ensureCredentials(ctx context.Context, eng engine.Engine, t
 		secret.Data = map[string][]byte{}
 	}
 	if len(secret.Data[v1alpha1.SecretKeyPassword]) == 0 {
-		pwd, err := password.Generate()
+		pwd, err := engine.GeneratePassword(eng)
 		if err != nil {
 			return err
 		}
@@ -415,6 +414,9 @@ func (r *Reconciler) ensureCredentials(ctx context.Context, eng engine.Engine, t
 	// Unknown until the database is reachable; filled in on a later reconcile.
 	if uri, err := eng.ConnectionURI(ctx, target, u.Spec.Username, string(secret.Data[v1alpha1.SecretKeyPassword])); err == nil {
 		secret.Data[v1alpha1.SecretKeyURI] = []byte(uri)
+	}
+	for k, v := range engine.ConnectionProperties(ctx, eng, target) {
+		secret.Data[k] = []byte(v)
 	}
 	labels := secret.GetLabels()
 	if labels == nil {

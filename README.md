@@ -2,7 +2,9 @@
 
 OpenEverest plugin for managing database users and their roles, so teams stop
 sharing the admin account and don't need a database shell to onboard an
-application.
+application. For models served through the Envoy AI Gateway, the same users
+are API keys: one per application, team or person, instead of one shared key
+per model.
 
 Users are declared as Kubernetes resources, `DatabaseUser`, and reconciled
 into the instance's database. Create them from the **Users** tab on the
@@ -16,6 +18,7 @@ Supported providers:
 |---|---|
 | `percona-server-mongodb` | Percona Server for MongoDB, through the operator's `spec.users` |
 | `provider-cloudnative-pg` | CloudNativePG 1.30+, through the operator's `DatabaseRole` resource |
+| `provider-kserve` | API keys for models on the Envoy AI Gateway, through the provider's key Secrets |
 
 ## DatabaseUser
 
@@ -52,9 +55,11 @@ status:
   `plugin-user-management.plugins.openeverest.io/drop-user`). DatabaseUsers
   are owned by their Instance, so deleting the instance deletes them.
 
-See [examples/databaseuser.yaml](examples/databaseuser.yaml) (MongoDB) and
+See [examples/databaseuser.yaml](examples/databaseuser.yaml) (MongoDB),
 [examples/databaseuser-postgresql.yaml](examples/databaseuser-postgresql.yaml)
-(CloudNativePG).
+(CloudNativePG) and
+[examples/databaseuser-kserve.yaml](examples/databaseuser-kserve.yaml)
+(an API key for a model).
 
 ## How it works
 
@@ -141,6 +146,46 @@ what it depends on (the operator's resources, Secrets).
   doesn't revert changes made to the role in SQL. Such drift shows up as
   `Pending` until the user's roles or password change again.
 
+### KServe engine (API keys for models)
+
+For `llm` and `predictor` Instances of provider-kserve exposed through the
+Envoy AI Gateway with API keys on, each user is a consumer of the model with
+its own API key. The provider's gateway auth renderer reads key Secrets in the
+format described in provider-kserve's
+[API keys proposal](https://github.com/openeverest/provider-kserve/blob/main/docs/proposals/ai-gateway-api-keys.md)
+(section 6.1), so the request path, quotas and metrics need no changes:
+
+- The password is the API key, generated as `oe_sk_<random>` like the
+  provider's own keys. The API and the Users tab never take a chosen key: the
+  provider disables every key whose value repeats another one. A
+  `passwordSecretRef` (kubectl only) must hold 32 to 128 printable ASCII
+  characters without spaces.
+- The engine writes one key Secret per user, `<instance>-api-key-<hash>`, in
+  the instance's namespace: the key under `api_key`, a key ID
+  (`openeverest.io/ai-gateway-key-id`) that is random and kept across
+  rotations, the model in `openeverest.io/ai-gateway-models`, the username in
+  the `openeverest.io/ai-gateway-key-owner-name` label, and an owner reference
+  to the Instance. The provider only accepts keys for models in the key's own
+  namespace.
+- Reset password rotates the key; deleting the user revokes it. Either takes
+  effect on the Gateway within seconds. A key Secret deleted by hand is
+  recreated. A missing or unusable `passwordSecretRef` removes the key Secret,
+  and the user stays `Pending` with the reason.
+- The one role is `invoke`. Usernames are label values: at most 63 letters,
+  digits, `-`, `_` or `.`, starting and ending with a letter or digit.
+- The credentials Secret also holds `uri`, the Gateway's OpenAI base URL, and
+  `model`, the name clients send in the `model` field, both read from the
+  Instance's connection Secret. The Users tab says "API key" instead of
+  "password" and always generates keys.
+- The model's own key from its connection details is listed as a system user
+  named after the Instance. Keys other tools wrote for the model are listed as
+  not managed.
+- Until the model is exposed through the AI Gateway with API keys on, users
+  stay `Pending`.
+- Token quotas (`tokenLimitPerHour`) apply per key and model, and the Gateway's
+  GenAI metrics carry the key ID (`openeverest_key_id`), so usage can be
+  attributed to each user. The key Secret maps the key ID to the username.
+
 ### Adding an engine
 
 An engine implements one provider ([backend/internal/engine/engine.go](backend/internal/engine/engine.go)):
@@ -160,7 +205,11 @@ type Engine interface {
 
 Engines whose operator reports per-user errors can also implement
 `PendingReasoner`, to explain in the DatabaseUser's status why a user isn't
-applied yet.
+applied yet. Engines whose users authenticate with API keys implement
+`APIKeyEngine` to generate and validate them (the UI then says "API key"), and
+engines whose clients need more than a URI implement
+`ConnectionPropertiesProvider` to add keys, such as `model`, to the
+credentials Secret.
 
 Engines are keyed by provider name (Instance `spec.providerRef.name`) in
 [backend/main.go](backend/main.go). Prefer declaring users through the
@@ -217,7 +266,7 @@ kubectl apply --server-side -f charts/plugin-user-management/crds
 
 | Value | Default | Description |
 |---|---|---|
-| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg]` | Providers that get the Users tab |
+| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-kserve]` | Providers that get the Users tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
 The chart's ClusterRole lets the backend manage DatabaseUsers and Secrets,
@@ -225,7 +274,8 @@ read Instances, get/patch `perconaservermongodbs`, manage CloudNativePG
 `databaseroles` and get `clusters` in every namespace (database namespaces
 are created dynamically). It caches only Secrets labeled
 `plugin-user-management.plugins.openeverest.io/instance`; the operator's
-Secrets are read one by one when needed.
+Secrets are read one by one when needed, and a model's API key Secrets are
+listed by label in its namespace.
 
 Because `DatabaseRole`s can declare superusers, write access to them is as
 powerful as superuser access to the clusters in their namespace. Grant users
@@ -239,16 +289,18 @@ DatabaseUser's name.
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `GET /api/users` | | `{users, roles, canManage, databaseError?}` |
+| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind}` |
 | `POST /api/users` | `{username, password?, roles}` | `201` credentials |
 | `PUT /api/users/{id}/roles` | `{roles}` | `204`; the roles replace the user's roles |
 | `GET /api/users/{id}/credentials` | | credentials |
 | `POST /api/users/{id}/password` | `{password?}` | credentials |
 | `DELETE /api/users/{id}` | | `204` |
 
-Credentials are `{id, username, password, uri?, secret}`. `roles` are
+Credentials are `{id, username, password, uri?, secret, properties?}`;
+`properties` holds further connection details such as `model`. `roles` are
 `[{role, database?}]`; `database` is only set for database-scoped roles. An
-empty `password` is generated (24 letters and digits).
+empty `password` is generated (24 letters and digits). When `credentialKind`
+is `apiKey`, the password must be empty and an `oe_sk_` API key is generated.
 
 ## Development
 
@@ -273,6 +325,8 @@ kubectl apply -f examples/databaseuser.yaml
 # CloudNativePG, with provider-cloudnative-pg installed:
 kubectl apply -f dev/demo-instance-postgresql.yaml
 kubectl apply -f examples/databaseuser-postgresql.yaml
+# API keys, with a provider-kserve model exposed through the AI Gateway:
+kubectl apply -f examples/databaseuser-kserve.yaml
 ```
 
 `make dev-deploy` needs Docker and installs
