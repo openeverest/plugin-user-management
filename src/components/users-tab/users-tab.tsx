@@ -10,6 +10,7 @@ import {
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import { useUsers } from 'hooks/useUsers';
+import { TermsContext, termsFor } from 'components/terms-context/terms.context';
 import { UsersDialogs } from './users-dialogs/users-dialogs';
 import { UsersTable } from './users-table/users-table';
 import { UsersDialogState } from './users-tab.types';
@@ -40,43 +41,46 @@ export const UsersTab = ({ namespace, instanceName }: UsersTabProps) => {
     );
   }
 
-  const { users, roles, canManage, databaseError } = data;
+  const { users, roles, canManage, databaseError, credentialKind } = data;
+  const terms = termsFor(credentialKind);
   return (
-    <Stack sx={{ gap: 2, mt: 2 }}>
-      <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
-        <Box>
-          <Typography variant="h6">{Messages.title}</Typography>
-          <Typography variant="body2" color="text.secondary">
-            {Messages.subtitle}
-          </Typography>
-        </Box>
-        <Tooltip title={canManage ? '' : Messages.readOnly}>
-          <span>
-            <Button
-              variant="contained"
-              startIcon={<AddIcon />}
-              disabled={!canManage}
-              onClick={() => setDialog({ kind: 'create' })}
-            >
-              {Messages.createUser}
-            </Button>
-          </span>
-        </Tooltip>
+    <TermsContext.Provider value={terms}>
+      <Stack sx={{ gap: 2, mt: 2 }}>
+        <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
+          <Box>
+            <Typography variant="h6">{terms.title}</Typography>
+            <Typography variant="body2" color="text.secondary">
+              {terms.subtitle}
+            </Typography>
+          </Box>
+          <Tooltip title={canManage ? '' : Messages.readOnly}>
+            <span>
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                disabled={!canManage}
+                onClick={() => setDialog({ kind: 'create' })}
+              >
+                {terms.createUser}
+              </Button>
+            </span>
+          </Tooltip>
+        </Stack>
+        {!canManage && <Alert severity="info">{Messages.readOnly}</Alert>}
+        {databaseError && <Alert severity="warning">{terms.databaseError(databaseError)}</Alert>}
+        {!users.some((u) => !u.system) && <Alert severity="info">{terms.noUsers}</Alert>}
+        <UsersTable
+          users={users}
+          canManage={canManage}
+          onAction={(kind, user) => setDialog({ kind, user })}
+        />
+        <UsersDialogs
+          target={target}
+          roles={roles}
+          dialog={dialog}
+          onClose={() => setDialog(null)}
+        />
       </Stack>
-      {!canManage && <Alert severity="info">{Messages.readOnly}</Alert>}
-      {databaseError && <Alert severity="warning">{Messages.databaseError(databaseError)}</Alert>}
-      {!users.some((u) => !u.system) && <Alert severity="info">{Messages.noUsers}</Alert>}
-      <UsersTable
-        users={users}
-        canManage={canManage}
-        onAction={(kind, user) => setDialog({ kind, user })}
-      />
-      <UsersDialogs
-        target={target}
-        roles={roles}
-        dialog={dialog}
-        onClose={() => setDialog(null)}
-      />
-    </Stack>
+    </TermsContext.Provider>
   );
 };

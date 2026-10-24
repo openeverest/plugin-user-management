@@ -3,6 +3,7 @@ import { IconButton, Menu, MenuItem } from '@mui/material';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import { ManagedUser, UserAction } from '../users-tab.types';
 import { Messages } from '../users-tab.messages';
+import { useTerms } from 'components/terms-context/terms.context';
 
 interface UserActionsMenuProps {
   user: ManagedUser;
@@ -12,6 +13,7 @@ interface UserActionsMenuProps {
 
 export const UserActionsMenu = ({ user, actions, onAction }: UserActionsMenuProps) => {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const terms = useTerms();
   return (
     <>
       <IconButton
@@ -31,7 +33,7 @@ export const UserActionsMenu = ({ user, actions, onAction }: UserActionsMenuProp
             }}
             sx={action === 'delete' ? { color: 'error.main' } : undefined}
           >
-            {Messages.actions[action]}
+            {action === 'resetPassword' ? terms.resetPassword : Messages.actions[action]}
           </MenuItem>
         ))}
       </Menu>

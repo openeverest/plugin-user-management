@@ -22,7 +22,6 @@ import (
 	"github.com/openeverest/plugin-user-management/backend/api/v1alpha1"
 	"github.com/openeverest/plugin-user-management/backend/internal/controller"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
-	"github.com/openeverest/plugin-user-management/backend/internal/password"
 )
 
 const (
@@ -76,6 +75,8 @@ type usersResponse struct {
 	CanManage bool `json:"canManage"`
 	// DatabaseError explains why users that exist only in the database are missing.
 	DatabaseError string `json:"databaseError,omitempty"`
+	// CredentialKind tells whether users authenticate with a password or an API key.
+	CredentialKind engine.CredentialKind `json:"credentialKind"`
 }
 
 type credentialsResponse struct {
@@ -86,6 +87,8 @@ type credentialsResponse struct {
 	URI string `json:"uri,omitempty"`
 	// Secret holds the credentials, for applications that mount them.
 	Secret string `json:"secret"`
+	// Properties are further connection details some engines need, e.g. a model name.
+	Properties map[string]string `json:"properties,omitempty"`
 }
 
 type createUserRequest struct {
@@ -196,12 +199,18 @@ func decodeBody(r *http.Request, w http.ResponseWriter, v any) error {
 	return nil
 }
 
-// passwordOrGenerated validates a requested password, or generates one.
-func passwordOrGenerated(requested string) (string, error) {
+// passwordOrGenerated validates a requested password, or generates one,
+// with the engine's rules: some engines use API keys instead of passwords.
+// API keys are always generated: a chosen key could repeat another key, which
+// the gateway refuses for both.
+func passwordOrGenerated(eng engine.Engine, requested string) (string, error) {
 	if requested == "" {
-		return password.Generate()
+		return engine.GeneratePassword(eng)
 	}
-	if err := password.Validate(requested); err != nil {
+	if engine.CredentialKindOf(eng) == engine.CredentialAPIKey {
+		return "", badRequest("API keys are always generated; leave the password empty")
+	}
+	if err := engine.ValidatePassword(eng, requested); err != nil {
 		return "", badRequest(err.Error())
 	}
 	return requested, nil
@@ -279,7 +288,12 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	resp := usersResponse{Users: []userView{}, Roles: a.engine.Roles(), CanManage: a.canManage}
+	resp := usersResponse{
+		Users:          []userView{},
+		Roles:          a.engine.Roles(),
+		CanManage:      a.canManage,
+		CredentialKind: engine.CredentialKindOf(a.engine),
+	}
 	managed := map[string]bool{}
 	for i := range declared {
 		resp.Users = append(resp.Users, managedView(a.engine, &declared[i]))
@@ -332,12 +346,12 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest("username must be 1-64 letters, digits, '_', '.', '@' or '-', starting with a letter or digit"))
 		return
 	}
-	pwd, err := passwordOrGenerated(req.Password)
+	a, err := s.authorize(r, true)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	a, err := s.authorize(r, true)
+	pwd, err := passwordOrGenerated(a.engine, req.Password)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -388,6 +402,7 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	creds := credentialsResponse{ID: name, Username: req.Username, Password: pwd, Secret: controller.CredentialsSecretName(user)}
 	creds.URI, _ = a.engine.ConnectionURI(ctx, a.target, req.Username, pwd)
+	creds.Properties = engine.ConnectionProperties(ctx, a.engine, a.target)
 
 	// The Secret comes first so the controller adopts this password instead of generating one.
 	secret := &corev1.Secret{
@@ -403,6 +418,9 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if creds.URI != "" {
 		secret.Data[v1alpha1.SecretKeyURI] = []byte(creds.URI)
+	}
+	for k, v := range creds.Properties {
+		secret.Data[k] = []byte(v)
 	}
 	if err := s.kube.Create(ctx, secret); err != nil {
 		writeError(w, err)
@@ -462,14 +480,25 @@ func (s *server) generatedSecret(ctx context.Context, u *v1alpha1.DatabaseUser) 
 	return secret, err
 }
 
-func credentialsOf(u *v1alpha1.DatabaseUser, secret *corev1.Secret) credentialsResponse {
-	return credentialsResponse{
+func credentialsOf(eng engine.Engine, u *v1alpha1.DatabaseUser, secret *corev1.Secret) credentialsResponse {
+	creds := credentialsResponse{
 		ID:       u.Name,
 		Username: u.Spec.Username,
 		Password: string(secret.Data[v1alpha1.SecretKeyPassword]),
 		URI:      string(secret.Data[v1alpha1.SecretKeyURI]),
 		Secret:   secret.Name,
 	}
+	if _, ok := eng.(engine.ConnectionPropertiesProvider); ok {
+		for k, v := range secret.Data {
+			if k != v1alpha1.SecretKeyUsername && k != v1alpha1.SecretKeyPassword && k != v1alpha1.SecretKeyURI {
+				if creds.Properties == nil {
+					creds.Properties = map[string]string{}
+				}
+				creds.Properties[k] = string(v)
+			}
+		}
+	}
+	return creds
 }
 
 // GET /api/users/{id}/credentials?k8sCluster=&namespace=&instance=
@@ -489,7 +518,7 @@ func (s *server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, credentialsOf(u, secret))
+	writeJSON(w, http.StatusOK, credentialsOf(a.engine, u, secret))
 }
 
 // POST /api/users/{id}/password?k8sCluster=&namespace=&instance=
@@ -499,12 +528,12 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	pwd, err := passwordOrGenerated(req.Password)
+	a, err := s.authorize(r, true)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	a, err := s.authorize(r, true)
+	pwd, err := passwordOrGenerated(a.engine, req.Password)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -532,7 +561,7 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("reset password of DatabaseUser %s/%s", u.Namespace, u.Name)
-	writeJSON(w, http.StatusOK, credentialsOf(u, secret))
+	writeJSON(w, http.StatusOK, credentialsOf(a.engine, u, secret))
 }
 
 // DELETE /api/users/{id}?k8sCluster=&namespace=&instance=
