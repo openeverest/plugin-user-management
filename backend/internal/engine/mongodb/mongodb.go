@@ -57,7 +57,7 @@ func (e *Engine) NormalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, 
 	return normalized, nil
 }
 
-// ValidateUser implements engine.Engine. The DatabaseUser username pattern
+// ValidateUser implements engine.Engine. The InstanceUser username pattern
 // already fits MongoDB, and the operator reads any password key.
 func (e *Engine) ValidateUser(engine.DesiredUser) error {
 	return nil

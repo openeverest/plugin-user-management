@@ -4,17 +4,17 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: databaseusers.plugin-user-management.plugins.openeverest.io
+  name: instanceusers.plugin-user-management.plugins.openeverest.io
 spec:
   group: plugin-user-management.plugins.openeverest.io
   names:
-    kind: DatabaseUser
-    listKind: DatabaseUserList
-    plural: databaseusers
+    kind: InstanceUser
+    listKind: InstanceUserList
+    plural: instanceusers
     shortNames:
-    - dbuser
-    - dbusers
-    singular: databaseuser
+    - iuser
+    - iusers
+    singular: instanceuser
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -33,7 +33,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: DatabaseUser is a user of an OpenEverest instance's database.
+        description: InstanceUser is a user of an OpenEverest instance's database.
         properties:
           apiVersion:
             description: |-
@@ -53,7 +53,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseUserSpec declares a database user.
+            description: InstanceUserSpec declares a database user.
             properties:
               instanceRef:
                 description: InstanceRef is the Instance whose database the user is
@@ -117,7 +117,7 @@ spec:
             - message: username is immutable
               rule: self.username == oldSelf.username
           status:
-            description: DatabaseUserStatus is the observed state of a DatabaseUser.
+            description: InstanceUserStatus is the observed state of an InstanceUser.
             properties:
               conditions:
                 items:
@@ -187,7 +187,7 @@ spec:
                 description: |-
                   Declared is set once the plugin has declared the user for the
                   database. A database user with the same name that exists before then
-                  is a conflict, so a DatabaseUser can't take over an existing account.
+                  is a conflict, so an InstanceUser can't take over an existing account.
                 type: boolean
               message:
                 type: string

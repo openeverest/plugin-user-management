@@ -3,7 +3,7 @@
 # reporting-service-credentials (keys: username, password, uri), which the
 # application can mount.
 apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
-kind: DatabaseUser
+kind: InstanceUser
 metadata:
   name: reporting-service
   namespace: um-test

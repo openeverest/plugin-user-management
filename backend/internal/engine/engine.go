@@ -1,5 +1,5 @@
 // Package engine defines the database-agnostic contract the plugin uses to
-// reconcile DatabaseUsers into an instance's database. Each supported
+// reconcile InstanceUsers into an instance's database. Each supported
 // provider implements Engine.
 package engine
 
@@ -49,7 +49,7 @@ type SecretKeyRef struct {
 	Key  string
 }
 
-// DesiredUser is a user the plugin manages, as declared by a DatabaseUser.
+// DesiredUser is a user the plugin manages, as declared by an InstanceUser.
 type DesiredUser struct {
 	Username string
 	// Roles as returned by NormalizeRoles.

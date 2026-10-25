@@ -103,11 +103,11 @@ func instance(provider string) *unstructured.Unstructured {
 
 var created = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-func dbUser(name, username string, roles ...v1alpha1.RoleGrant) *v1alpha1.DatabaseUser {
+func dbUser(name, username string, roles ...v1alpha1.RoleGrant) *v1alpha1.InstanceUser {
 	created = created.Add(time.Minute)
-	return &v1alpha1.DatabaseUser{
+	return &v1alpha1.InstanceUser{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, CreationTimestamp: metav1.NewTime(created)},
-		Spec: v1alpha1.DatabaseUserSpec{
+		Spec: v1alpha1.InstanceUserSpec{
 			InstanceRef: v1alpha1.InstanceReference{Name: "mongo"},
 			Username:    username,
 			Roles:       roles,
@@ -128,9 +128,9 @@ func newHarness(t *testing.T, objs ...client.Object) *harness {
 	c := fake.NewClientBuilder().
 		WithScheme(newScheme(t)).
 		WithObjects(objs...).
-		WithStatusSubresource(&v1alpha1.DatabaseUser{}).
-		WithIndex(&v1alpha1.DatabaseUser{}, InstanceIndex, func(obj client.Object) []string {
-			return []string{obj.(*v1alpha1.DatabaseUser).Spec.InstanceRef.Name}
+		WithStatusSubresource(&v1alpha1.InstanceUser{}).
+		WithIndex(&v1alpha1.InstanceUser{}, InstanceIndex, func(obj client.Object) []string {
+			return []string{obj.(*v1alpha1.InstanceUser).Spec.InstanceRef.Name}
 		}).
 		Build()
 	eng := &fakeEngine{}
@@ -146,9 +146,9 @@ func (h *harness) reconcile() ctrl.Result {
 	return res
 }
 
-func (h *harness) get(name string) *v1alpha1.DatabaseUser {
+func (h *harness) get(name string) *v1alpha1.InstanceUser {
 	h.t.Helper()
-	u := &v1alpha1.DatabaseUser{}
+	u := &v1alpha1.InstanceUser{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, u); err != nil {
 		h.t.Fatalf("get %s: %v", name, err)
 	}
@@ -207,7 +207,7 @@ func TestNewUserLifecycle(t *testing.T) {
 		t.Error("password changed on a later reconcile")
 	}
 
-	// Deleting the DatabaseUser drops it from the declared users and the database.
+	// Deleting the InstanceUser drops it from the declared users and the database.
 	if err := h.client.Delete(context.Background(), h.get("app")); err != nil {
 		t.Fatal(err)
 	}
@@ -218,9 +218,9 @@ func TestNewUserLifecycle(t *testing.T) {
 	if !reflect.DeepEqual(h.engine.dropped, []string{"app"}) {
 		t.Errorf("dropped = %v", h.engine.dropped)
 	}
-	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "app"}, &v1alpha1.DatabaseUser{})
+	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "app"}, &v1alpha1.InstanceUser{})
 	if !apierrors.IsNotFound(err) {
-		t.Errorf("DatabaseUser not released: %v", err)
+		t.Errorf("InstanceUser not released: %v", err)
 	}
 }
 
@@ -261,9 +261,9 @@ func TestKeepsDeletingUserUntilDropped(t *testing.T) {
 
 	h.engine.dropErr = nil
 	h.reconcile()
-	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "old"}, &v1alpha1.DatabaseUser{})
+	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "old"}, &v1alpha1.InstanceUser{})
 	if !apierrors.IsNotFound(err) {
-		t.Errorf("DatabaseUser not released once dropped: %v", err)
+		t.Errorf("InstanceUser not released once dropped: %v", err)
 	}
 }
 
@@ -283,10 +283,10 @@ func TestRejectsTakeoverAndInvalidUsers(t *testing.T) {
 	h.reconcile()
 
 	for name, want := range map[string]string{
-		"existing": `user "boss" already exists in the database and isn't managed by this DatabaseUser`,
+		"existing": `user "boss" already exists in the database and isn't managed by this InstanceUser`,
 		"system":   `user "userAdmin" is reserved for the operator`,
 		"reserved": "invalid user\nuser \"reserved\" is reserved",
-		"second":   `another DatabaseUser already declares user "dup" on this instance`,
+		"second":   `another InstanceUser already declares user "dup" on this instance`,
 	} {
 		if s := h.get(name).Status; s.Phase != v1alpha1.PhaseFailed || s.Message != want || s.Declared {
 			t.Errorf("%s: status = %+v", name, s)
@@ -319,7 +319,7 @@ func TestRefreshesURIWhenPasswordEdited(t *testing.T) {
 }
 
 func TestKeepsChosenPassword(t *testing.T) {
-	// The API writes the Secret with the user's chosen password before the DatabaseUser.
+	// The API writes the Secret with the user's chosen password before the InstanceUser.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "app-credentials", Namespace: ns},
 		Data:       map[string][]byte{"password": []byte("chosen-password")},
@@ -383,7 +383,7 @@ func TestInstanceGone(t *testing.T) {
 	if s := h.get("app").Status; s.Phase != v1alpha1.PhaseFailed || s.Message != `instance "mongo" not found` {
 		t.Errorf("status = %+v", s)
 	}
-	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "old"}, &v1alpha1.DatabaseUser{})
+	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "old"}, &v1alpha1.InstanceUser{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("deleted user not released: %v", err)
 	}

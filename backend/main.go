@@ -179,7 +179,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := controller.IndexInstance(ctx, mgr); err != nil {
-		log.Fatalf("index DatabaseUsers: %v", err)
+		log.Fatalf("index InstanceUsers: %v", err)
 	}
 	if err := (&controller.Reconciler{Client: mgr.GetClient(), Engines: engines}).SetupWithManager(mgr); err != nil {
 		log.Fatalf("set up controller: %v", err)

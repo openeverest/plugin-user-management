@@ -29,7 +29,7 @@ $(CONTROLLER_GEN):
 	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.18.0
 
 .PHONY: generate
-generate: $(CONTROLLER_GEN) ## Generate DeepCopy code and the DatabaseUser CRD from backend/api.
+generate: $(CONTROLLER_GEN) ## Generate DeepCopy code and the InstanceUser CRD from backend/api.
 	cd backend && $(CONTROLLER_GEN) object:headerFile=../hack/boilerplate.go.txt paths=./api/...
 	cd backend && $(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=../charts/plugin-user-management/crds
 
