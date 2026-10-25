@@ -4,7 +4,7 @@
 # key, uri = the Gateway's OpenAI base URL, model), which the application can
 # mount, and allows the key to call the model.
 apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
-kind: DatabaseUser
+kind: InstanceUser
 metadata:
   name: chat-app
   namespace: default

@@ -16,13 +16,13 @@ metadata:
 rules:
   # The plugin's own API: declared users, reconciled by the backend.
   - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
-    resources: ["databaseusers"]
+    resources: ["instanceusers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
-    resources: ["databaseusers/status"]
+    resources: ["instanceusers/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
-    resources: ["databaseusers/finalizers"]
+    resources: ["instanceusers/finalizers"]
     verbs: ["update"]
   # Generated passwords, the operator's user admin credentials and TLS CA.
   # list/watch feed an informer restricted to the plugin's own credentials

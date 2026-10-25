@@ -4,7 +4,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Phases of a DatabaseUser.
+// Phases of an InstanceUser.
 const (
 	// PhasePending: the user is being created or changed in the database.
 	PhasePending = "Pending"
@@ -26,13 +26,13 @@ const (
 	SecretKeyURI      = "uri"
 )
 
-// InstanceReference names an OpenEverest Instance in the DatabaseUser's namespace.
+// InstanceReference names an OpenEverest Instance in the InstanceUser's namespace.
 type InstanceReference struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }
 
-// SecretKeySelector selects a key of a Secret in the DatabaseUser's namespace.
+// SecretKeySelector selects a key of a Secret in the InstanceUser's namespace.
 type SecretKeySelector struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
@@ -49,10 +49,10 @@ type RoleGrant struct {
 	Database string `json:"database,omitempty"`
 }
 
-// DatabaseUserSpec declares a database user.
+// InstanceUserSpec declares a database user.
 // +kubebuilder:validation:XValidation:rule="self.instanceRef == oldSelf.instanceRef",message="instanceRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.username == oldSelf.username",message="username is immutable"
-type DatabaseUserSpec struct {
+type InstanceUserSpec struct {
 	// InstanceRef is the Instance whose database the user is created in.
 	InstanceRef InstanceReference `json:"instanceRef"`
 	// Username in the database.
@@ -70,8 +70,8 @@ type DatabaseUserSpec struct {
 	PasswordSecretRef *SecretKeySelector `json:"passwordSecretRef,omitempty"`
 }
 
-// DatabaseUserStatus is the observed state of a DatabaseUser.
-type DatabaseUserStatus struct {
+// InstanceUserStatus is the observed state of an InstanceUser.
+type InstanceUserStatus struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 	// +optional
@@ -82,7 +82,7 @@ type DatabaseUserStatus struct {
 	CredentialsSecret string `json:"credentialsSecret,omitempty"`
 	// Declared is set once the plugin has declared the user for the
 	// database. A database user with the same name that exists before then
-	// is a conflict, so a DatabaseUser can't take over an existing account.
+	// is a conflict, so an InstanceUser can't take over an existing account.
 	// +optional
 	Declared bool `json:"declared,omitempty"`
 	// +optional
@@ -93,32 +93,32 @@ type DatabaseUserStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// DatabaseUser is a user of an OpenEverest instance's database.
+// InstanceUser is a user of an OpenEverest instance's database.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=dbuser;dbusers
+// +kubebuilder:resource:shortName=iuser;iusers
 // +kubebuilder:printcolumn:name="Instance",type=string,JSONPath=`.spec.instanceRef.name`
 // +kubebuilder:printcolumn:name="Username",type=string,JSONPath=`.spec.username`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-type DatabaseUser struct {
+type InstanceUser struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DatabaseUserSpec   `json:"spec"`
-	Status DatabaseUserStatus `json:"status,omitempty"`
+	Spec   InstanceUserSpec   `json:"spec"`
+	Status InstanceUserStatus `json:"status,omitempty"`
 }
 
-// DatabaseUserList is a list of DatabaseUsers.
+// InstanceUserList is a list of InstanceUsers.
 //
 // +kubebuilder:object:root=true
-type DatabaseUserList struct {
+type InstanceUserList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DatabaseUser `json:"items"`
+	Items           []InstanceUser `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&DatabaseUser{}, &DatabaseUserList{})
+	SchemeBuilder.Register(&InstanceUser{}, &InstanceUserList{})
 }

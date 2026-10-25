@@ -6,7 +6,7 @@ application. For models served through the Envoy AI Gateway, the same users
 are API keys: one per application, team or person, instead of one shared key
 per model.
 
-Users are declared as Kubernetes resources, `DatabaseUser`, and reconciled
+Users are declared as Kubernetes resources, `InstanceUser`, and reconciled
 into the instance's database. Create them from the **Users** tab on the
 instance page or with `kubectl`/GitOps; either way the plugin keeps the
 database in sync, stores generated credentials in a Secret applications can
@@ -20,11 +20,11 @@ Supported providers:
 | `provider-cloudnative-pg` | CloudNativePG 1.30+, through the operator's `DatabaseRole` resource |
 | `provider-kserve` | API keys for models on the Envoy AI Gateway, through the provider's key Secrets |
 
-## DatabaseUser
+## InstanceUser
 
 ```yaml
 apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
-kind: DatabaseUser
+kind: InstanceUser
 metadata:
   name: orders-service
   namespace: team-a          # the instance's namespace
@@ -47,18 +47,18 @@ status:
 
 - Without `passwordSecretRef` the plugin generates a password into
   `<name>-credentials` with keys `username`, `password` and `uri` (an
-  in-cluster connection string). The Secret is owned by the DatabaseUser.
+  in-cluster connection string). The Secret is owned by the InstanceUser.
   Editing its `password` rotates the password in the database.
 - `Ready` means the user exists in the database with exactly the declared
   roles. Role changes go back to `Pending` until the database matches.
-- Deleting a DatabaseUser drops the user from the database (finalizer
-  `plugin-user-management.plugins.openeverest.io/drop-user`). DatabaseUsers
+- Deleting an InstanceUser drops the user from the database (finalizer
+  `plugin-user-management.plugins.openeverest.io/drop-user`). InstanceUsers
   are owned by their Instance, so deleting the instance deletes them.
 
-See [examples/databaseuser.yaml](examples/databaseuser.yaml) (MongoDB),
-[examples/databaseuser-postgresql.yaml](examples/databaseuser-postgresql.yaml)
+See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
+[examples/instanceuser-postgresql.yaml](examples/instanceuser-postgresql.yaml)
 (CloudNativePG) and
-[examples/databaseuser-kserve.yaml](examples/databaseuser-kserve.yaml)
+[examples/instanceuser-kserve.yaml](examples/instanceuser-kserve.yaml)
 (an API key for a model).
 
 ## How it works
@@ -68,7 +68,7 @@ flowchart LR
   UI["Users tab"] -->|user token| ES[everest-server<br/>plugin proxy]
   ES --> API[plugin API]
   API -->|authorize as the user| EV[Everest API]
-  API -->|DatabaseUser, Secret| K8S[(Kubernetes)]
+  API -->|InstanceUser, Secret| K8S[(Kubernetes)]
   CLI[kubectl / GitOps] --> K8S
   K8S --> CTRL[plugin controller]
   CTRL -->|"spec.users (server-side apply)"| CR[PerconaServerMongoDB]
@@ -80,10 +80,10 @@ The backend is one binary with two parts:
 
 - **API** for the UI: authorizes every request against the Everest API with
   the caller's token (see [Permissions](#permissions)), then creates, patches
-  or deletes DatabaseUsers and their Secrets. It lists users by merging the
-  DatabaseUsers with the users that exist in the database.
+  or deletes InstanceUsers and their Secrets. It lists users by merging the
+  InstanceUsers with the users that exist in the database.
 - **Controller** (controller-runtime, leader-elected) reconciling
-  DatabaseUsers per instance. It hands them to the instance's **engine**,
+  InstanceUsers per instance. It hands them to the instance's **engine**,
   which declares them in the database operator's own API, observes the
   database to report status, and drops users that are deleted.
 
@@ -123,14 +123,14 @@ what it depends on (the operator's resources, Secrets).
   `username`.
 - `DatabaseRole`s use the `retain` reclaim policy, so deleting one by hand
   keeps the role. To drop a user the controller switches its `DatabaseRole`
-  to `delete` and deletes it. The DatabaseUser stays `Deleting` until the
+  to `delete` and deletes it. The InstanceUser stays `Deleting` until the
   operator has dropped the role; if the role still owns objects, PostgreSQL
   refuses and the operator's error is shown until they're reassigned or
   dropped.
 - Reads roles and memberships from `pg_roles` over TLS, verified against the
   cluster's CA, as the application owner (`<cluster>-app`), or the superuser
   when that's the only Secret. When a declared user isn't applied, the
-  `DatabaseRole`'s error is reported in the DatabaseUser's status.
+  `DatabaseRole`'s error is reported in the InstanceUser's status.
 - `postgres`, `streaming_replica`, `cnpg_*`, the application owner and roles
   in the Cluster's `spec.managed.roles` are listed as system users. Roles
   declared by other `DatabaseRole`s are listed too, even before they exist, so
@@ -204,7 +204,7 @@ type Engine interface {
 ```
 
 Engines whose operator reports per-user errors can also implement
-`PendingReasoner`, to explain in the DatabaseUser's status why a user isn't
+`PendingReasoner`, to explain in the InstanceUser's status why a user isn't
 applied yet. Engines whose users authenticate with API keys implement
 `APIKeyEngine` to generate and validate them (the UI then says "API key"), and
 engines whose clients need more than a URI implement
@@ -228,9 +228,9 @@ engine's RBAC to the chart and the provider to the tab's `providers` (in
 Changing users takes `read-connection` because whoever can read the
 instance's admin credentials can already manage its users with them; the
 plugin doesn't introduce a new permission. With `kubectl`, Kubernetes RBAC on
-`databaseusers` applies instead.
+`instanceusers` applies instead.
 
-The controller enforces these rules whichever way a DatabaseUser is created:
+The controller enforces these rules whichever way an InstanceUser is created:
 
 - **Only a curated set of roles can be granted.** Roles that reach user or
   cluster administration of the whole instance (MongoDB `root`,
@@ -238,11 +238,11 @@ The controller enforces these rules whichever way a DatabaseUser is created:
   superuser, `createrole`, `replication`, server file and program access) are
   rejected, and database-scoped roles can't target the `admin`, `config` or
   `local` databases.
-- **No takeover of existing accounts.** A DatabaseUser whose username
+- **No takeover of existing accounts.** An InstanceUser whose username
   already exists in the database before the plugin declares it fails, so it
   can't reset the password or roles of an operator system user or of a user
   created outside OpenEverest. Those users are listed read-only.
-- One DatabaseUser per username and instance; the oldest wins.
+- One InstanceUser per username and instance; the oldest wins.
 
 ## Requirements
 
@@ -257,11 +257,45 @@ helm install plugin-user-management charts/plugin-user-management \
   --namespace everest-system
 ```
 
-Helm installs the DatabaseUser CRD from `crds/` but never upgrades or deletes
+Helm installs the InstanceUser CRD from `crds/` but never upgrades or deletes
 it. On upgrades apply it first:
 
 ```bash
 kubectl apply --server-side -f charts/plugin-user-management/crds
+```
+
+### Upgrading from 0.1.x
+
+The release after 0.1.x renames the resource from `DatabaseUser` to
+`InstanceUser`, since it also holds API keys for models. It's a clean break,
+with no migration:
+
+1. Back up and delete your `DatabaseUser`s. The plugin drops their users from
+   the database and revokes their API keys.
+2. Upgrade the chart (apply the new CRD first, as above).
+3. Re-create the users as `InstanceUser`s: from your GitOps manifests with
+   `kind` changed, or in the Users tab. The backup shows what they were. They
+   get new passwords and API keys, so update the applications that use them.
+4. Delete the old CRD.
+
+```bash
+kubectl get databaseusers -A -o yaml > databaseusers-backup.yaml
+kubectl delete databaseusers --all -A
+# upgrade the chart, re-create the users, then:
+kubectl delete crd databaseusers.plugin-user-management.plugins.openeverest.io
+```
+
+Users whose `DatabaseUser` wasn't deleted before the upgrade stay in the
+database unmanaged, and an `InstanceUser` can't take them over. Their
+`DatabaseUser`s keep the plugin's finalizer, which nothing removes any more, so
+deleting the old CRD waits on them. Remove it by hand:
+
+```bash
+kubectl get databaseusers -A --no-headers \
+  -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name |
+while read -r ns name; do
+  kubectl -n "$ns" patch databaseuser "$name" --type merge -p '{"metadata":{"finalizers":null}}'
+done
 ```
 
 | Value | Default | Description |
@@ -269,7 +303,7 @@ kubectl apply --server-side -f charts/plugin-user-management/crds
 | `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-kserve]` | Providers that get the Users tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
-The chart's ClusterRole lets the backend manage DatabaseUsers and Secrets,
+The chart's ClusterRole lets the backend manage InstanceUsers and Secrets,
 read Instances, get/patch `perconaservermongodbs`, manage CloudNativePG
 `databaseroles` and get `clusters` in every namespace (database namespaces
 are created dynamically). It caches only Secrets labeled
@@ -279,13 +313,13 @@ listed by label in its namespace.
 
 Because `DatabaseRole`s can declare superusers, write access to them is as
 powerful as superuser access to the clusters in their namespace. Grant users
-DatabaseUsers, not DatabaseRoles.
+InstanceUsers, not DatabaseRoles.
 
 ## API
 
 Served under `/v1/clusters/{cluster}/plugins/plugin-user-management` by
 everest-server. Every endpoint takes `?namespace=&instance=`; `{id}` is the
-DatabaseUser's name.
+InstanceUser's name.
 
 | Endpoint | Body | Returns |
 |---|---|---|
@@ -321,12 +355,12 @@ current kubeconfig context:
 make dev-registry     # throwaway in-cluster registry (dev/registry.yaml)
 make dev-deploy       # build, push to it, apply the CRD, helm upgrade --install
 kubectl create namespace um-test && kubectl apply -f dev/demo-instance.yaml
-kubectl apply -f examples/databaseuser.yaml
+kubectl apply -f examples/instanceuser.yaml
 # CloudNativePG, with provider-cloudnative-pg installed:
 kubectl apply -f dev/demo-instance-postgresql.yaml
-kubectl apply -f examples/databaseuser-postgresql.yaml
+kubectl apply -f examples/instanceuser-postgresql.yaml
 # API keys, with a provider-kserve model exposed through the AI Gateway:
-kubectl apply -f examples/databaseuser-kserve.yaml
+kubectl apply -f examples/instanceuser-kserve.yaml
 ```
 
 `make dev-deploy` needs Docker and installs
@@ -351,5 +385,5 @@ GitHub release with notes.
 - Per-database PostgreSQL roles (read-only and read-write on one database),
   which need privileges CloudNativePG doesn't declare.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.
-- Adopting existing database users into a DatabaseUser.
+- Adopting existing database users into an InstanceUser.
 - Configurable role catalog per installation.

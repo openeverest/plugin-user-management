@@ -14,7 +14,7 @@ export interface RoleGrant {
 export type UserPhase = 'Pending' | 'Ready' | 'Failed' | 'Deleting';
 
 export interface DbUser {
-  // DatabaseUser name; absent for users the plugin doesn't manage.
+  // InstanceUser name; absent for users the plugin doesn't manage.
   id?: string;
   username: string;
   database?: string;

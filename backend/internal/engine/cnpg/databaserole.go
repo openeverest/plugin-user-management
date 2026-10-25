@@ -23,7 +23,7 @@ const (
 	// FieldManager owns the DatabaseRoles the plugin declares.
 	FieldManager = "plugin-user-management"
 	// instanceLabel marks the DatabaseRoles the plugin declares, with the
-	// instance they belong to, like the DatabaseUsers they come from.
+	// instance they belong to, like the InstanceUsers they come from.
 	instanceLabel = "plugin-user-management.plugins.openeverest.io/instance"
 	// reloadLabel makes CloudNativePG apply password Secret changes right away.
 	reloadLabel = "cnpg.io/reload"

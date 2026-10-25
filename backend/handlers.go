@@ -31,7 +31,7 @@ const (
 	maxNameStemLength = 200
 )
 
-// Mirrors the DatabaseUser CRD's username pattern.
+// Mirrors the InstanceUser CRD's username pattern.
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$`)
 
 var invalidNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -51,12 +51,12 @@ type instanceRef struct {
 
 // userView is a row of the users list.
 type userView struct {
-	// ID is the DatabaseUser's name; empty for users the plugin doesn't manage.
+	// ID is the InstanceUser's name; empty for users the plugin doesn't manage.
 	ID       string             `json:"id,omitempty"`
 	Username string             `json:"username"`
 	Database string             `json:"database,omitempty"`
 	Roles    []engine.RoleGrant `json:"roles"`
-	// Managed users are declared by a DatabaseUser and can be changed.
+	// Managed users are declared by an InstanceUser and can be changed.
 	Managed bool `json:"managed"`
 	// System users are created and used by the operator.
 	System  bool   `json:"system"`
@@ -216,7 +216,7 @@ func passwordOrGenerated(eng engine.Engine, requested string) (string, error) {
 	return requested, nil
 }
 
-// userResourceName derives a valid, collision-free DatabaseUser name from
+// userResourceName derives a valid, collision-free InstanceUser name from
 // the username, which may hold characters Kubernetes names can't.
 func userResourceName(instance, username string) string {
 	sum := sha256.Sum256([]byte(username))
@@ -227,15 +227,15 @@ func userResourceName(instance, username string) string {
 	return strings.Trim(stem, "-") + "-" + hex.EncodeToString(sum[:])[:6]
 }
 
-func (s *server) instanceUsers(ctx context.Context, target engine.Target) ([]v1alpha1.DatabaseUser, error) {
-	var list v1alpha1.DatabaseUserList
+func (s *server) instanceUsers(ctx context.Context, target engine.Target) ([]v1alpha1.InstanceUser, error) {
+	var list v1alpha1.InstanceUserList
 	err := s.kube.List(ctx, &list, client.InNamespace(target.Namespace), client.MatchingFields{controller.InstanceIndex: target.Instance})
 	return list.Items, err
 }
 
-// databaseUser returns the DatabaseUser with the given ID if it belongs to the target instance.
-func (s *server) databaseUser(ctx context.Context, target engine.Target, id string) (*v1alpha1.DatabaseUser, error) {
-	u := &v1alpha1.DatabaseUser{}
+// instanceUser returns the InstanceUser with the given ID if it belongs to the target instance.
+func (s *server) instanceUser(ctx context.Context, target engine.Target, id string) (*v1alpha1.InstanceUser, error) {
+	u := &v1alpha1.InstanceUser{}
 	if err := s.kube.Get(ctx, types.NamespacedName{Namespace: target.Namespace, Name: id}, u); err != nil {
 		return nil, err
 	}
@@ -253,7 +253,7 @@ func toAPIGrants(grants []engine.RoleGrant) []v1alpha1.RoleGrant {
 	return out
 }
 
-func managedView(eng engine.Engine, u *v1alpha1.DatabaseUser) userView {
+func managedView(eng engine.Engine, u *v1alpha1.InstanceUser) userView {
 	v := userView{
 		ID:                u.Name,
 		Username:          u.Spec.Username,
@@ -388,13 +388,13 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := userResourceName(a.target.Instance, req.Username)
-	user := &v1alpha1.DatabaseUser{
+	user := &v1alpha1.InstanceUser{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: a.target.Namespace,
 			Labels:    map[string]string{controller.InstanceLabel: a.target.Instance},
 		},
-		Spec: v1alpha1.DatabaseUserSpec{
+		Spec: v1alpha1.InstanceUserSpec{
 			InstanceRef: v1alpha1.InstanceReference{Name: a.target.Instance},
 			Username:    req.Username,
 			Roles:       toAPIGrants(roles),
@@ -431,7 +431,7 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	log.Printf("declared user %q on %s/%s as DatabaseUser %s", req.Username, a.target.Namespace, a.target.Instance, name)
+	log.Printf("declared user %q on %s/%s as InstanceUser %s", req.Username, a.target.Namespace, a.target.Instance, name)
 	writeJSON(w, http.StatusCreated, creds)
 }
 
@@ -452,7 +452,7 @@ func (s *server) handleUpdateRoles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	u, err := s.databaseUser(r.Context(), a.target, r.PathValue("id"))
+	u, err := s.instanceUser(r.Context(), a.target, r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -463,12 +463,12 @@ func (s *server) handleUpdateRoles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	log.Printf("updated roles of DatabaseUser %s/%s", u.Namespace, u.Name)
+	log.Printf("updated roles of InstanceUser %s/%s", u.Namespace, u.Name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // generatedSecret returns the plugin-managed credentials Secret of a user.
-func (s *server) generatedSecret(ctx context.Context, u *v1alpha1.DatabaseUser) (*corev1.Secret, error) {
+func (s *server) generatedSecret(ctx context.Context, u *v1alpha1.InstanceUser) (*corev1.Secret, error) {
 	if u.Spec.PasswordSecretRef != nil {
 		return nil, conflict("the password is kept in Secret " + u.Spec.PasswordSecretRef.Name + ", which is managed outside OpenEverest")
 	}
@@ -480,7 +480,7 @@ func (s *server) generatedSecret(ctx context.Context, u *v1alpha1.DatabaseUser) 
 	return secret, err
 }
 
-func credentialsOf(eng engine.Engine, u *v1alpha1.DatabaseUser, secret *corev1.Secret) credentialsResponse {
+func credentialsOf(eng engine.Engine, u *v1alpha1.InstanceUser, secret *corev1.Secret) credentialsResponse {
 	creds := credentialsResponse{
 		ID:       u.Name,
 		Username: u.Spec.Username,
@@ -508,7 +508,7 @@ func (s *server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	u, err := s.databaseUser(r.Context(), a.target, r.PathValue("id"))
+	u, err := s.instanceUser(r.Context(), a.target, r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -539,7 +539,7 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	u, err := s.databaseUser(ctx, a.target, r.PathValue("id"))
+	u, err := s.instanceUser(ctx, a.target, r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -560,7 +560,7 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	log.Printf("reset password of DatabaseUser %s/%s", u.Namespace, u.Name)
+	log.Printf("reset password of InstanceUser %s/%s", u.Namespace, u.Name)
 	writeJSON(w, http.StatusOK, credentialsOf(a.engine, u, secret))
 }
 
@@ -571,7 +571,7 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	u, err := s.databaseUser(r.Context(), a.target, r.PathValue("id"))
+	u, err := s.instanceUser(r.Context(), a.target, r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -580,7 +580,7 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	log.Printf("deleted DatabaseUser %s/%s", u.Namespace, u.Name)
+	log.Printf("deleted InstanceUser %s/%s", u.Namespace, u.Name)
 	w.WriteHeader(http.StatusNoContent)
 }
 

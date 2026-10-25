@@ -111,8 +111,8 @@ func newTestEnv(t *testing.T, provider string, instanceStatus, connectionStatus 
 	kube := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithIndex(&v1alpha1.DatabaseUser{}, controller.InstanceIndex, func(obj client.Object) []string {
-			return []string{obj.(*v1alpha1.DatabaseUser).Spec.InstanceRef.Name}
+		WithIndex(&v1alpha1.InstanceUser{}, controller.InstanceIndex, func(obj client.Object) []string {
+			return []string{obj.(*v1alpha1.InstanceUser).Spec.InstanceRef.Name}
 		}).
 		Build()
 	eng := &fakeEngine{}
@@ -157,8 +157,8 @@ func (e *testEnv) do(method, target, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func (e *testEnv) databaseUsers() []v1alpha1.DatabaseUser {
-	var list v1alpha1.DatabaseUserList
+func (e *testEnv) instanceUsers() []v1alpha1.InstanceUser {
+	var list v1alpha1.InstanceUserList
 	if err := e.kube.List(context.Background(), &list); err != nil {
 		e.t.Fatal(err)
 	}
@@ -173,15 +173,15 @@ func (e *testEnv) secret(name string) *corev1.Secret {
 	return s
 }
 
-func declared(name, username, instance string) *v1alpha1.DatabaseUser {
-	return &v1alpha1.DatabaseUser{
+func declared(name, username, instance string) *v1alpha1.InstanceUser {
+	return &v1alpha1.InstanceUser{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
-		Spec: v1alpha1.DatabaseUserSpec{
+		Spec: v1alpha1.InstanceUserSpec{
 			InstanceRef: v1alpha1.InstanceReference{Name: instance},
 			Username:    username,
 			Roles:       []v1alpha1.RoleGrant{{Role: "read", Database: "shop"}},
 		},
-		Status: v1alpha1.DatabaseUserStatus{Phase: v1alpha1.PhaseReady},
+		Status: v1alpha1.InstanceUserStatus{Phase: v1alpha1.PhaseReady},
 	}
 }
 
@@ -192,7 +192,7 @@ func credentialsSecret(name, pwd string) *corev1.Secret {
 	}
 }
 
-func TestListMergesDeclaredAndDatabaseUsers(t *testing.T) {
+func TestListMergesDeclaredAndInstanceUsers(t *testing.T) {
 	env := newTestEnv(t, "percona-server-mongodb", http.StatusOK, http.StatusForbidden,
 		declared("mongo-app-1", "app", "mongo"),
 		declared("other-x-1", "x", "other"),
@@ -254,7 +254,7 @@ func TestListWhenDatabaseUnreachable(t *testing.T) {
 	}
 }
 
-func TestCreateUserDeclaresDatabaseUser(t *testing.T) {
+func TestCreateUserDeclaresInstanceUser(t *testing.T) {
 	env := newTestEnv(t, "percona-server-mongodb", http.StatusOK, http.StatusOK)
 	rec := env.do(http.MethodPost, "/api/users"+testQuery, `{"username":"Shop_App@x","roles":[{"role":"read","database":"shop"},{"role":"readAnyDatabase","database":"x"}]}`)
 	if rec.Code != http.StatusCreated {
@@ -265,13 +265,13 @@ func TestCreateUserDeclaresDatabaseUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	users := env.databaseUsers()
+	users := env.instanceUsers()
 	if len(users) != 1 {
-		t.Fatalf("DatabaseUsers = %+v", users)
+		t.Fatalf("InstanceUsers = %+v", users)
 	}
 	u := users[0]
 	if !strings.HasPrefix(u.Name, "mongo-shop-app-x-") || u.Spec.Username != "Shop_App@x" || u.Spec.InstanceRef.Name != "mongo" || u.Labels[controller.InstanceLabel] != "mongo" {
-		t.Errorf("DatabaseUser = %+v", u)
+		t.Errorf("InstanceUser = %+v", u)
 	}
 	wantRoles := []v1alpha1.RoleGrant{{Role: "read", Database: "shop"}, {Role: "readAnyDatabase"}}
 	if len(u.Spec.Roles) != 2 || u.Spec.Roles[0] != wantRoles[0] || u.Spec.Roles[1] != wantRoles[1] {
@@ -307,8 +307,8 @@ func TestCreateUserRejects(t *testing.T) {
 			if rec := env.do(http.MethodPost, "/api/users"+testQuery, tc.body); rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.want, rec.Body)
 			}
-			if n := len(env.databaseUsers()); n != 1 {
-				t.Errorf("DatabaseUsers = %d", n)
+			if n := len(env.instanceUsers()); n != 1 {
+				t.Errorf("InstanceUsers = %d", n)
 			}
 		})
 	}
@@ -319,7 +319,7 @@ func TestUpdateRoles(t *testing.T) {
 	if rec := env.do(http.MethodPut, "/api/users/mongo-app-1/roles"+testQuery, `{"roles":[{"role":"readAnyDatabase","database":"x"}]}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
-	for _, u := range env.databaseUsers() {
+	for _, u := range env.instanceUsers() {
 		if u.Name == "mongo-app-1" && (len(u.Spec.Roles) != 1 || u.Spec.Roles[0] != (v1alpha1.RoleGrant{Role: "readAnyDatabase"})) {
 			t.Errorf("roles = %+v", u.Spec.Roles)
 		}
@@ -369,8 +369,8 @@ func TestDeleteUser(t *testing.T) {
 	if rec := env.do(http.MethodDelete, "/api/users/mongo-app-1"+testQuery, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
-	if n := len(env.databaseUsers()); n != 0 {
-		t.Errorf("DatabaseUsers left: %d", n)
+	if n := len(env.instanceUsers()); n != 0 {
+		t.Errorf("InstanceUsers left: %d", n)
 	}
 	if rec := env.do(http.MethodDelete, "/api/users/mongo-app-1"+testQuery, ""); rec.Code != http.StatusNotFound {
 		t.Errorf("second delete: status = %d", rec.Code)
@@ -413,9 +413,9 @@ func TestAuthorization(t *testing.T) {
 			if strings.Contains(rec.Body.String(), "old-password") {
 				t.Error("credentials leaked")
 			}
-			users := env.databaseUsers()
+			users := env.instanceUsers()
 			if len(users) != 1 || users[0].Spec.Roles[0].Database != "shop" {
-				t.Error("DatabaseUsers changed despite failed authorization")
+				t.Error("InstanceUsers changed despite failed authorization")
 			}
 			if string(env.secret("mongo-app-1-credentials").Data["password"]) != "old-password" {
 				t.Error("password changed despite failed authorization")

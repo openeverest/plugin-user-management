@@ -1,4 +1,4 @@
-// Package controller reconciles DatabaseUsers into their instances' databases.
+// Package controller reconciles InstanceUsers into their instances' databases.
 package controller
 
 import (
@@ -27,11 +27,11 @@ import (
 )
 
 const (
-	// Finalizer drops the user from the database before the DatabaseUser goes away.
+	// Finalizer drops the user from the database before the InstanceUser goes away.
 	Finalizer = "plugin-user-management.plugins.openeverest.io/drop-user"
-	// InstanceIndex indexes DatabaseUsers by spec.instanceRef.name.
+	// InstanceIndex indexes InstanceUsers by spec.instanceRef.name.
 	InstanceIndex = "spec.instanceRef.name"
-	// InstanceLabel lets kubectl select an instance's DatabaseUsers.
+	// InstanceLabel lets kubectl select an instance's InstanceUsers.
 	InstanceLabel = "plugin-user-management.plugins.openeverest.io/instance"
 
 	defaultPasswordKey = "password"
@@ -42,12 +42,12 @@ const (
 var InstanceGVK = schema.GroupVersionKind{Group: "core.openeverest.io", Version: "v1alpha1", Kind: "Instance"}
 
 // CredentialsSecretName is the Secret holding a generated password.
-func CredentialsSecretName(u *v1alpha1.DatabaseUser) string {
+func CredentialsSecretName(u *v1alpha1.InstanceUser) string {
 	return u.Name + "-credentials"
 }
 
 // PasswordRef returns where the user's password is kept.
-func PasswordRef(u *v1alpha1.DatabaseUser) engine.SecretKeyRef {
+func PasswordRef(u *v1alpha1.InstanceUser) engine.SecretKeyRef {
 	if ref := u.Spec.PasswordSecretRef; ref != nil {
 		key := ref.Key
 		if key == "" {
@@ -67,9 +67,9 @@ func ToEngineGrants(grants []v1alpha1.RoleGrant) []engine.RoleGrant {
 	return out
 }
 
-// Reconciler reconciles all DatabaseUsers of an instance at once: engines
+// Reconciler reconciles all InstanceUsers of an instance at once: engines
 // declare an instance's managed users as a whole (e.g. PerconaServerMongoDB
-// spec.users), so requests are keyed by instance, not by DatabaseUser.
+// spec.users), so requests are keyed by instance, not by InstanceUser.
 type Reconciler struct {
 	Client client.Client
 	// Engines by provider name (Instance spec.providerRef.name).
@@ -78,8 +78,8 @@ type Reconciler struct {
 
 // IndexInstance registers the InstanceIndex field index.
 func IndexInstance(ctx context.Context, mgr ctrl.Manager) error {
-	return mgr.GetFieldIndexer().IndexField(ctx, &v1alpha1.DatabaseUser{}, InstanceIndex, func(obj client.Object) []string {
-		u, ok := obj.(*v1alpha1.DatabaseUser)
+	return mgr.GetFieldIndexer().IndexField(ctx, &v1alpha1.InstanceUser{}, InstanceIndex, func(obj client.Object) []string {
+		u, ok := obj.(*v1alpha1.InstanceUser)
 		if !ok {
 			return nil
 		}
@@ -90,10 +90,10 @@ func IndexInstance(ctx context.Context, mgr ctrl.Manager) error {
 // SetupWithManager registers the reconciler.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("databaseuser").
-		Watches(&v1alpha1.DatabaseUser{}, handler.EnqueueRequestsFromMapFunc(
+		Named("instanceuser").
+		Watches(&v1alpha1.InstanceUser{}, handler.EnqueueRequestsFromMapFunc(
 			func(_ context.Context, obj client.Object) []reconcile.Request {
-				u, ok := obj.(*v1alpha1.DatabaseUser)
+				u, ok := obj.(*v1alpha1.InstanceUser)
 				if !ok {
 					return nil
 				}
@@ -111,9 +111,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// userState is the outcome of reconciling one DatabaseUser.
+// userState is the outcome of reconciling one InstanceUser.
 type userState struct {
-	user     *v1alpha1.DatabaseUser
+	user     *v1alpha1.InstanceUser
 	roles    []engine.RoleGrant
 	password engine.SecretKeyRef
 	phase    string
@@ -129,16 +129,16 @@ func (s *userState) pending(message string) {
 	s.phase, s.message = v1alpha1.PhasePending, message
 }
 
-// Reconcile reconciles the DatabaseUsers of the instance named by req.
+// Reconcile reconciles the InstanceUsers of the instance named by req.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var list v1alpha1.DatabaseUserList
+	var list v1alpha1.InstanceUserList
 	if err := r.Client.List(ctx, &list, client.InNamespace(req.Namespace), client.MatchingFields{InstanceIndex: req.Name}); err != nil {
 		return ctrl.Result{}, err
 	}
 	if len(list.Items) == 0 {
 		return ctrl.Result{}, nil
 	}
-	// Oldest first: it wins when two DatabaseUsers declare the same username.
+	// Oldest first: it wins when two InstanceUsers declare the same username.
 	sort.Slice(list.Items, func(i, j int) bool {
 		a, b := list.Items[i], list.Items[j]
 		if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
@@ -147,7 +147,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return a.Name < b.Name
 	})
 
-	var live, deleting []*v1alpha1.DatabaseUser
+	var live, deleting []*v1alpha1.InstanceUser
 	for i := range list.Items {
 		if list.Items[i].DeletionTimestamp.IsZero() {
 			live = append(live, &list.Items[i])
@@ -195,7 +195,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			continue
 		}
 		if usernames[u.Spec.Username] {
-			s.fail(fmt.Sprintf("another DatabaseUser already declares user %q on this instance", u.Spec.Username))
+			s.fail(fmt.Sprintf("another InstanceUser already declares user %q on this instance", u.Spec.Username))
 			continue
 		}
 		usernames[u.Spec.Username] = true
@@ -222,7 +222,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 // syncDatabase declares the valid users, drops deleted ones and works out each user's phase.
-func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target engine.Target, states []*userState, deleting []*v1alpha1.DatabaseUser) (ctrl.Result, error) {
+func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target engine.Target, states []*userState, deleting []*v1alpha1.InstanceUser) (ctrl.Result, error) {
 	dbUsers, err := eng.ListUsers(ctx, target)
 	if err != nil {
 		if !errors.Is(err, engine.ErrNotReady) {
@@ -252,7 +252,7 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 			if dbUser.System {
 				s.fail(fmt.Sprintf("user %q is reserved for the operator", s.user.Spec.Username))
 			} else {
-				s.fail(fmt.Sprintf("user %q already exists in the database and isn't managed by this DatabaseUser", s.user.Spec.Username))
+				s.fail(fmt.Sprintf("user %q already exists in the database and isn't managed by this InstanceUser", s.user.Spec.Username))
 			}
 			continue
 		}
@@ -288,7 +288,7 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("drop user %q: %w", u.Spec.Username, err)
 			}
-			log.FromContext(ctx).Info("dropped database user", "user", u.Spec.Username, "databaseUser", u.Name)
+			log.FromContext(ctx).Info("dropped database user", "user", u.Spec.Username, "instanceUser", u.Name)
 		}
 		if err := r.removeFinalizer(ctx, u); err != nil {
 			return ctrl.Result{}, err
@@ -319,7 +319,7 @@ func usernameDeclared(users []engine.DesiredUser, username string) bool {
 
 // abandon fails live users and releases deleted ones when the instance's
 // database can't be managed.
-func (r *Reconciler) abandon(ctx context.Context, live, deleting []*v1alpha1.DatabaseUser, message string) error {
+func (r *Reconciler) abandon(ctx context.Context, live, deleting []*v1alpha1.InstanceUser, message string) error {
 	for _, u := range deleting {
 		if err := r.removeFinalizer(ctx, u); err != nil {
 			return err
@@ -337,7 +337,7 @@ func (r *Reconciler) abandon(ctx context.Context, live, deleting []*v1alpha1.Dat
 
 // ensureMetadata adds the finalizer, the instance label and an owner
 // reference to the Instance, so deleting the instance deletes its users.
-func (r *Reconciler) ensureMetadata(ctx context.Context, u *v1alpha1.DatabaseUser, instance *unstructured.Unstructured) error {
+func (r *Reconciler) ensureMetadata(ctx context.Context, u *v1alpha1.InstanceUser, instance *unstructured.Unstructured) error {
 	orig := u.DeepCopy()
 	controllerutil.AddFinalizer(u, Finalizer)
 	labels := u.GetLabels()
@@ -370,13 +370,13 @@ func hasOwner(obj metav1.Object, uid types.UID) bool {
 	return false
 }
 
-func equalMetadata(a, b *v1alpha1.DatabaseUser) bool {
+func equalMetadata(a, b *v1alpha1.InstanceUser) bool {
 	return len(a.Finalizers) == len(b.Finalizers) &&
 		a.Labels[InstanceLabel] == b.Labels[InstanceLabel] &&
 		len(a.OwnerReferences) == len(b.OwnerReferences)
 }
 
-func (r *Reconciler) removeFinalizer(ctx context.Context, u *v1alpha1.DatabaseUser) error {
+func (r *Reconciler) removeFinalizer(ctx context.Context, u *v1alpha1.InstanceUser) error {
 	if !controllerutil.ContainsFinalizer(u, Finalizer) {
 		return nil
 	}
@@ -388,7 +388,7 @@ func (r *Reconciler) removeFinalizer(ctx context.Context, u *v1alpha1.DatabaseUs
 // ensureCredentials keeps the generated-password Secret: creates it with a
 // random password, or adopts one the API created with a chosen password,
 // and keeps its username and connection string current.
-func (r *Reconciler) ensureCredentials(ctx context.Context, eng engine.Engine, target engine.Target, u *v1alpha1.DatabaseUser) error {
+func (r *Reconciler) ensureCredentials(ctx context.Context, eng engine.Engine, target engine.Target, u *v1alpha1.InstanceUser) error {
 	key := types.NamespacedName{Namespace: u.Namespace, Name: CredentialsSecretName(u)}
 	secret := &corev1.Secret{}
 	err := r.Client.Get(ctx, key, secret)
