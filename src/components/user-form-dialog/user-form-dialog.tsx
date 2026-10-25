@@ -15,6 +15,7 @@ import { NewUser, Role, RoleGrant } from 'types/users.types';
 import { RoleGrantRow } from './role-grant-row/role-grant-row';
 import { EMPTY_ROLE_GRANT, RoleGrantDraft, UserFormMode } from './user-form-dialog.types';
 import {
+  canAddRoleRow,
   hasErrors,
   initialFormValues,
   toRoleGrants,
@@ -22,6 +23,7 @@ import {
 } from './user-form-dialog.utils';
 import { Messages } from './user-form-dialog.messages';
 import { useTerms } from 'components/terms-context/terms.context';
+import { hasDatabaseRoles } from 'utils/roles.utils';
 
 interface UserFormDialogProps {
   mode: UserFormMode;
@@ -45,7 +47,7 @@ export const UserFormDialog = ({
   onSubmit,
   onClose,
 }: UserFormDialogProps) => {
-  const [values, setValues] = useState(() => initialFormValues(initialRoles));
+  const [values, setValues] = useState(() => initialFormValues(initialRoles, roles));
   const [submitted, setSubmitted] = useState(false);
   const terms = useTerms();
   const errors = validateUserForm(values, roles, mode);
@@ -107,19 +109,22 @@ export const UserFormDialog = ({
                 errors={errors.roleRows[index]}
                 showErrors={submitted}
                 canRemove={values.roles.length > 1}
+                showDatabase={hasDatabaseRoles(roles)}
                 onChange={(next) => setRoleRow(index, next)}
                 onRemove={() =>
                   setValues((v) => ({ ...v, roles: v.roles.filter((_, i) => i !== index) }))
                 }
               />
             ))}
-            <Button
-              startIcon={<AddIcon />}
-              onClick={() => setValues((v) => ({ ...v, roles: [...v.roles, EMPTY_ROLE_GRANT] }))}
-              sx={{ alignSelf: 'flex-start' }}
-            >
-              {Messages.addRole}
-            </Button>
+            {canAddRoleRow(values.roles, roles) && (
+              <Button
+                startIcon={<AddIcon />}
+                onClick={() => setValues((v) => ({ ...v, roles: [...v.roles, EMPTY_ROLE_GRANT] }))}
+                sx={{ alignSelf: 'flex-start' }}
+              >
+                {Messages.addRole}
+              </Button>
+            )}
             {submitted && errors.roles && <Alert severity="error">{errors.roles}</Alert>}
             {error && <Alert severity="error">{error}</Alert>}
           </Stack>

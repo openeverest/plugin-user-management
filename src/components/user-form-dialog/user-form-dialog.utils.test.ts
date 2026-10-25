@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Role } from 'types/users.types';
 import {
+  canAddRoleRow,
   hasErrors,
   initialFormValues,
   toRoleGrants,
@@ -98,5 +99,28 @@ describe('initialFormValues', () => {
       { role: 'readAnyDatabase', database: '' },
       { role: 'readWrite', database: 'x' },
     ]);
+  });
+
+  it('pre-selects the only role there is', () => {
+    const invoke: Role[] = [{ name: 'invoke', scope: 'cluster', description: '' }];
+    expect(initialFormValues([], invoke).roles).toEqual([{ role: 'invoke', database: '' }]);
+    expect(initialFormValues([], roles).roles).toEqual([{ role: '', database: '' }]);
+  });
+});
+
+describe('canAddRoleRow', () => {
+  const clusterRoles: Role[] = [
+    { name: 'pg_read_all_data', scope: 'cluster', description: '' },
+    { name: 'pg_monitor', scope: 'cluster', description: '' },
+  ];
+  const row = (role: string) => ({ role, database: '' });
+
+  it('always allows another row when roles are granted per database', () => {
+    expect(canAddRoleRow([row('readWrite'), row('readAnyDatabase')], roles)).toBe(true);
+  });
+
+  it('allows one row per role when every role applies to the whole instance', () => {
+    expect(canAddRoleRow([row('pg_monitor')], clusterRoles)).toBe(true);
+    expect(canAddRoleRow([row('pg_monitor'), row('pg_read_all_data')], clusterRoles)).toBe(false);
   });
 });

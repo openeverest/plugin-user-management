@@ -1,5 +1,5 @@
 import { Role, RoleGrant } from 'types/users.types';
-import { findRole } from 'utils/roles.utils';
+import { findRole, hasDatabaseRoles } from 'utils/roles.utils';
 import {
   EMPTY_ROLE_GRANT,
   PASSWORD_MAX_LENGTH,
@@ -11,13 +11,21 @@ import {
 } from './user-form-dialog.types';
 import { Messages } from './user-form-dialog.messages';
 
-export const initialFormValues = (grants: RoleGrant[] = []): UserFormValues => ({
-  username: '',
-  password: '',
-  roles: grants.length
-    ? grants.map(({ role, database }) => ({ role, database: database ?? '' }))
-    : [EMPTY_ROLE_GRANT],
-});
+// A new user starts with one empty role row, or with the only role there is.
+export const initialFormValues = (grants: RoleGrant[] = [], roles: Role[] = []): UserFormValues => {
+  let rows: RoleGrantDraft[] = [EMPTY_ROLE_GRANT];
+  if (grants.length) {
+    rows = grants.map(({ role, database }) => ({ role, database: database ?? '' }));
+  } else if (roles.length === 1) {
+    rows = [{ ...EMPTY_ROLE_GRANT, role: roles[0].name }];
+  }
+  return { username: '', password: '', roles: rows };
+};
+
+// Database-scoped roles can be granted on many databases; otherwise each role
+// can be granted once.
+export const canAddRoleRow = (rows: RoleGrantDraft[], roles: Role[]) =>
+  hasDatabaseRoles(roles) || rows.length < roles.length;
 
 const isDatabaseScoped = (roles: Role[], name: string) =>
   findRole(roles, name)?.scope === 'database';

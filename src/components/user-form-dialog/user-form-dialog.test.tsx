@@ -92,4 +92,32 @@ describe('UserFormDialog', () => {
       roles: [{ role: 'readAnyDatabase' }],
     });
   });
+
+  it('has no database field or extra rows for a single instance-wide role', () => {
+    const onSubmit = vi.fn();
+    const invoke: Role[] = [{ name: 'invoke', scope: 'cluster', description: 'Call the model' }];
+    render(
+      <TermsContext.Provider value={API_KEY_TERMS}>
+        <UserFormDialog mode="create" roles={invoke} isSubmitting={false} onSubmit={onSubmit} onClose={vi.fn()} />
+      </TermsContext.Provider>
+    );
+    expect(screen.queryByLabelText(Messages.database)).toBeNull();
+    expect(screen.queryByRole('button', { name: Messages.addRole })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(API_KEY_TERMS.username), { target: { value: 'chat-app' } });
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      username: 'chat-app',
+      password: undefined,
+      roles: [{ role: 'invoke' }],
+    });
+  });
+
+  it('keeps the database field when roles are granted per database', () => {
+    render(
+      <UserFormDialog mode="create" roles={roles} isSubmitting={false} onSubmit={vi.fn()} onClose={vi.fn()} />
+    );
+    expect(screen.getByLabelText(Messages.database)).toBeTruthy();
+  });
 });
