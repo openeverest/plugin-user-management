@@ -1,8 +1,5 @@
 export const Messages = {
-  createTitle: 'Create database user',
   editRolesTitle: (username: string) => `Edit roles of ${username}`,
-  username: 'Username',
-  password: 'Password',
   passwordHelper: 'Leave empty to generate a strong password.',
   roles: 'Roles',
   role: 'Role',

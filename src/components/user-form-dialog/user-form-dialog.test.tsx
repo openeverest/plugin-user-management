@@ -3,6 +3,11 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { Role } from 'types/users.types';
 import { UserFormDialog } from './user-form-dialog';
 import { Messages } from './user-form-dialog.messages';
+import {
+  API_KEY_TERMS,
+  PASSWORD_TERMS,
+  TermsContext,
+} from 'components/terms-context/terms.context';
 
 const roles: Role[] = [
   { name: 'readWrite', scope: 'database', description: 'Read and write' },
@@ -27,7 +32,7 @@ describe('UserFormDialog', () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.getByText(Messages.usernameRequired)).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText(Messages.username), { target: { value: ' app ' } });
+    fireEvent.change(screen.getByLabelText(PASSWORD_TERMS.username), { target: { value: ' app ' } });
     selectRole(0, 'readWrite');
     fireEvent.change(screen.getByLabelText(Messages.database), { target: { value: 'shop' } });
     fireEvent.click(screen.getByRole('button', { name: Messages.addRole }));
@@ -54,13 +59,35 @@ describe('UserFormDialog', () => {
         onClose={vi.fn()}
       />
     );
-    expect(screen.queryByLabelText(Messages.username)).toBeNull();
+    expect(screen.queryByLabelText(PASSWORD_TERMS.username)).toBeNull();
 
     fireEvent.click(screen.getAllByRole('button', { name: Messages.removeRole })[0]);
     fireEvent.click(screen.getByRole('button', { name: Messages.save }));
 
     expect(onSubmit).toHaveBeenCalledWith({
       username: 'app',
+      password: undefined,
+      roles: [{ role: 'readAnyDatabase' }],
+    });
+  });
+
+  it('generates API keys instead of asking for a password', () => {
+    const onSubmit = vi.fn();
+    render(
+      <TermsContext.Provider value={API_KEY_TERMS}>
+        <UserFormDialog mode="create" roles={roles} isSubmitting={false} onSubmit={onSubmit} onClose={vi.fn()} />
+      </TermsContext.Provider>
+    );
+    expect(screen.getByText(API_KEY_TERMS.createTitle)).toBeTruthy();
+    expect(screen.queryByLabelText(PASSWORD_TERMS.secret)).toBeNull();
+    expect(screen.queryByLabelText(API_KEY_TERMS.secret)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(API_KEY_TERMS.username), { target: { value: 'chat-app' } });
+    selectRole(0, 'readAnyDatabase');
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      username: 'chat-app',
       password: undefined,
       roles: [{ role: 'readAnyDatabase' }],
     });

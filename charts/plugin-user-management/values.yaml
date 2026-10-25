@@ -15,7 +15,7 @@ service:
 
 plugin:
   displayName: "User Management"
-  description: "Database users and their roles."
+  description: "Database users and their roles, and API keys for models."
   vendor: "OpenEverest"
   enabled: true
   bundlePath: "/main.js"
@@ -28,6 +28,7 @@ plugin:
       providers:
         - percona-server-mongodb
         - provider-cloudnative-pg
+        - provider-kserve
 
 # Optional override for the Everest API URL. When empty the backend discovers
 # the everest Service via Kubernetes-injected env vars (same namespace), then

@@ -27,11 +27,15 @@ export interface DbUser {
   ownPasswordSecret?: boolean;
 }
 
+// How users authenticate: database passwords, or API keys for models.
+export type CredentialKind = 'password' | 'apiKey';
+
 export interface UsersResponse {
   users: DbUser[];
   roles: Role[];
   canManage: boolean;
   databaseError?: string;
+  credentialKind?: CredentialKind;
 }
 
 export interface Credentials {
@@ -41,6 +45,8 @@ export interface Credentials {
   // Empty until the database is reachable.
   uri?: string;
   secret: string;
+  // Further connection details some engines need, e.g. the model name.
+  properties?: Record<string, string>;
 }
 
 export interface NewUser {

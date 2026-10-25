@@ -21,6 +21,7 @@ import {
   validateUserForm,
 } from './user-form-dialog.utils';
 import { Messages } from './user-form-dialog.messages';
+import { useTerms } from 'components/terms-context/terms.context';
 
 interface UserFormDialogProps {
   mode: UserFormMode;
@@ -46,6 +47,7 @@ export const UserFormDialog = ({
 }: UserFormDialogProps) => {
   const [values, setValues] = useState(() => initialFormValues(initialRoles));
   const [submitted, setSubmitted] = useState(false);
+  const terms = useTerms();
   const errors = validateUserForm(values, roles, mode);
   const isCreate = mode === 'create';
 
@@ -68,7 +70,7 @@ export const UserFormDialog = ({
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="sm">
       <form onSubmit={handleSubmit} noValidate>
-        <DialogTitle>{isCreate ? Messages.createTitle : Messages.editRolesTitle(username)}</DialogTitle>
+        <DialogTitle>{isCreate ? terms.createTitle : Messages.editRolesTitle(username)}</DialogTitle>
         <DialogContent>
           <Stack sx={{ gap: 2, pt: 1 }}>
             {isCreate && (
@@ -76,22 +78,24 @@ export const UserFormDialog = ({
                 <TextField
                   autoFocus
                   size="small"
-                  label={Messages.username}
+                  label={terms.username}
                   value={values.username}
                   onChange={(e) => setValues((v) => ({ ...v, username: e.target.value }))}
                   error={submitted && !!errors.username}
                   helperText={submitted ? errors.username : undefined}
                 />
-                <TextField
-                  size="small"
-                  type="password"
-                  autoComplete="new-password"
-                  label={Messages.password}
-                  value={values.password}
-                  onChange={(e) => setValues((v) => ({ ...v, password: e.target.value }))}
-                  error={submitted && !!errors.password}
-                  helperText={(submitted && errors.password) || Messages.passwordHelper}
-                />
+                {terms.customSecret && (
+                  <TextField
+                    size="small"
+                    type="password"
+                    autoComplete="new-password"
+                    label={terms.secret}
+                    value={values.password}
+                    onChange={(e) => setValues((v) => ({ ...v, password: e.target.value }))}
+                    error={submitted && !!errors.password}
+                    helperText={(submitted && errors.password) || Messages.passwordHelper}
+                  />
+                )}
               </>
             )}
             <Typography variant="subtitle2">{Messages.roles}</Typography>
