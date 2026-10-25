@@ -11,6 +11,8 @@ interface RoleGrantRowProps {
   errors: RoleGrantErrors;
   showErrors: boolean;
   canRemove: boolean;
+  // False when no role of the engine is granted on a database.
+  showDatabase: boolean;
   onChange: (value: RoleGrantDraft) => void;
   onRemove: () => void;
 }
@@ -21,6 +23,7 @@ export const RoleGrantRow = ({
   errors,
   showErrors,
   canRemove,
+  showDatabase,
   onChange,
   onRemove,
 }: RoleGrantRowProps) => {
@@ -44,16 +47,18 @@ export const RoleGrantRow = ({
           </MenuItem>
         ))}
       </TextField>
-      <TextField
-        size="small"
-        label={Messages.database}
-        value={isClusterScoped ? Messages.allDatabases : value.database}
-        disabled={isClusterScoped}
-        onChange={(e) => onChange({ ...value, database: e.target.value })}
-        error={showErrors && !!errors.database}
-        helperText={showErrors ? errors.database : undefined}
-        sx={{ flex: 1 }}
-      />
+      {showDatabase && (
+        <TextField
+          size="small"
+          label={Messages.database}
+          value={isClusterScoped ? Messages.allDatabases : value.database}
+          disabled={isClusterScoped}
+          onChange={(e) => onChange({ ...value, database: e.target.value })}
+          error={showErrors && !!errors.database}
+          helperText={showErrors ? errors.database : undefined}
+          sx={{ flex: 1 }}
+        />
+      )}
       <Tooltip title={Messages.removeRole}>
         <span>
           <IconButton aria-label={Messages.removeRole} onClick={onRemove} disabled={!canRemove}>
