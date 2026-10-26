@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -64,8 +65,8 @@ func TestResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.host != "mongo-rs0.ns.svc.cluster.local:27017" {
-		t.Errorf("host = %q", c.host)
+	if want := []string{"mongo-rs0.ns.svc.cluster.local:27017"}; !slices.Equal(c.hosts, want) {
+		t.Errorf("hosts = %q, want %q", c.hosts, want)
 	}
 	if c.adminUser != "userAdmin" || c.adminPass != "uapass" || c.requireTLS {
 		t.Errorf("cluster = %+v", c)
@@ -93,8 +94,23 @@ func TestResolveRequireTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.requireTLS || string(c.caPEM) != "PEM" || c.host != "mongo-mongos.ns.svc.cluster.local:27018" {
+	if !c.requireTLS || string(c.caPEM) != "PEM" || !slices.Equal(c.hosts, []string{"mongo-mongos.ns.svc.cluster.local:27018"}) {
 		t.Errorf("cluster = %+v", c)
+	}
+}
+
+func TestParseHosts(t *testing.T) {
+	for status, want := range map[string][]string{
+		"mongo-rs0.ns.svc.cluster.local": {"mongo-rs0.ns.svc.cluster.local:27017"},
+		"mongo-rs0-0.mongo-rs0.ns.svc.cluster.local:27017,mongo-rs0-1.mongo-rs0.ns.svc.cluster.local:27017, mongo-rs0-2.mongo-rs0.ns.svc.cluster.local": {
+			"mongo-rs0-0.mongo-rs0.ns.svc.cluster.local:27017",
+			"mongo-rs0-1.mongo-rs0.ns.svc.cluster.local:27017",
+			"mongo-rs0-2.mongo-rs0.ns.svc.cluster.local:27017",
+		},
+	} {
+		if got := parseHosts(status); !slices.Equal(got, want) {
+			t.Errorf("parseHosts(%q) = %q, want %q", status, got, want)
+		}
 	}
 }
 

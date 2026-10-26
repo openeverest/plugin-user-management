@@ -28,8 +28,8 @@ const (
 
 // cluster is what the plugin needs to reach a PerconaServerMongoDB cluster.
 type cluster struct {
-	// host:port of the replica set or mongos service.
-	host        string
+	// host:port of each replica set member or of the mongos service.
+	hosts       []string
 	requireTLS  bool
 	caPEM       []byte
 	adminUser   string
@@ -58,10 +58,7 @@ func (r *clusterResolver) resolve(ctx context.Context, target engine.Target) (cl
 	if state != psmdbStateReady || host == "" {
 		return cluster{}, fmt.Errorf("%w: MongoDB cluster is %q", engine.ErrNotReady, state)
 	}
-	if !strings.Contains(host, ":") {
-		host += ":" + defaultPort
-	}
-	c := cluster{host: host}
+	c := cluster{hosts: parseHosts(host)}
 
 	usersSecret, _, _ := unstructured.NestedString(psmdb.Object, "spec", "secrets", "users")
 	if usersSecret == "" {
@@ -97,4 +94,21 @@ func (r *clusterResolver) resolve(ctx context.Context, target engine.Target) (cl
 		c.caPEM = ssl.Data[caCertKey]
 	}
 	return c, nil
+}
+
+// parseHosts splits status.host, which lists every replica set member
+// ("a:27017,b:27017,...") unless the cluster is exposed through one service.
+func parseHosts(status string) []string {
+	var hosts []string
+	for _, host := range strings.Split(status, ",") {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		if !strings.Contains(host, ":") {
+			host += ":" + defaultPort
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }

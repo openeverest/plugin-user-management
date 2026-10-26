@@ -29,7 +29,7 @@ func (f *fakeSession) dropUser(_ context.Context, db, user string) error {
 func (f *fakeSession) close(context.Context) { f.closed = true }
 
 var testCluster = cluster{
-	host:        "mongo-rs0.ns.svc.cluster.local:27017",
+	hosts:       []string{"mongo-rs0.ns.svc.cluster.local:27017"},
 	adminUser:   "userAdmin",
 	adminPass:   "secret",
 	systemUsers: map[string]bool{"userAdmin": true, "clusterMonitor": true},
@@ -177,6 +177,19 @@ func TestDropUser(t *testing.T) {
 	s.dropErr = errors.New("boom")
 	if err := e.DropUser(context.Background(), target, "app"); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestConnectionURIReplicaSetMembers(t *testing.T) {
+	c := testCluster
+	c.hosts = []string{"mongo-rs0-0.mongo-rs0:27017", "mongo-rs0-1.mongo-rs0:27017"}
+	e, _ := newTestEngine(&fakeSession{}, c)
+	uri, err := e.ConnectionURI(context.Background(), target, "app", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "mongodb://app:password@mongo-rs0-0.mongo-rs0:27017,mongo-rs0-1.mongo-rs0:27017/?authSource=admin"; uri != want {
+		t.Errorf("uri = %q, want %q", uri, want)
 	}
 }
 

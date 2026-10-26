@@ -43,7 +43,7 @@ type driverSession struct {
 
 func dialDriver(_ context.Context, c cluster) (session, error) {
 	opts := options.Client().
-		SetHosts([]string{c.host}).
+		SetHosts(c.hosts).
 		SetAuth(options.Credential{Username: c.adminUser, Password: c.adminPass, AuthSource: adminDatabase}).
 		SetConnectTimeout(connectTimeout).
 		SetServerSelectionTimeout(connectTimeout).

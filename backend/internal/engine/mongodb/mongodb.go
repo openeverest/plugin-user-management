@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -150,7 +151,7 @@ func (e *Engine) ConnectionURI(ctx context.Context, target engine.Target, userna
 	uri := url.URL{
 		Scheme:   "mongodb",
 		User:     url.UserPassword(username, password),
-		Host:     c.host,
+		Host:     strings.Join(c.hosts, ","),
 		Path:     "/",
 		RawQuery: query.Encode(),
 	}
