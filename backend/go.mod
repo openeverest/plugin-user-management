@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/xdg-go/scram v1.2.0
 	go.mongodb.org/mongo-driver/v2 v2.9.2
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
@@ -52,7 +53,6 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
-	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

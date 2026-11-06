@@ -18,6 +18,7 @@ Supported providers:
 |---|---|
 | `percona-server-mongodb` | Percona Server for MongoDB, through the operator's `spec.users` |
 | `provider-cloudnative-pg` | CloudNativePG 1.30+, through the operator's `DatabaseRole` resource |
+| `provider-percona-postgresql` | Percona Operator for PostgreSQL, through SQL as the operator's `postgres` superuser |
 | `provider-kserve` | API keys for models on the Envoy AI Gateway, through the provider's key Secrets |
 
 ## InstanceUser
@@ -57,7 +58,9 @@ status:
 
 See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
 [examples/instanceuser-postgresql.yaml](examples/instanceuser-postgresql.yaml)
-(CloudNativePG) and
+(CloudNativePG),
+[examples/instanceuser-percona-postgresql.yaml](examples/instanceuser-percona-postgresql.yaml)
+(Percona PostgreSQL) and
 [examples/instanceuser-kserve.yaml](examples/instanceuser-kserve.yaml)
 (an API key for a model).
 
@@ -145,6 +148,41 @@ what it depends on (the operator's resources, Secrets).
 - The operator applies a `DatabaseRole` when it or its Secret changes; it
   doesn't revert changes made to the role in SQL. Such drift shows up as
   `Pending` until the user's roles or password change again.
+
+### Percona PostgreSQL engine
+
+The operator's `spec.users` can't grant role memberships (it applies
+`options` with `ALTER ROLE`), only takes passwords from Secrets it writes
+itself, and never drops users. So the plugin manages users in SQL and leaves
+`spec.users` to the provider:
+
+- Connects to the primary (`<cluster>-primary`) as the operator's `postgres`
+  superuser (`<cluster>-pguser-postgres`, which the provider always declares),
+  over TLS verified against the CA in `<cluster>-cluster-cert` (or
+  `spec.secrets.customTLSSecret`).
+- Each user is a login role with no other attributes (`NOSUPERUSER`,
+  `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`), a member of
+  exactly the granted roles, and commented `Managed by OpenEverest`. Every
+  reconcile restores the attributes, grants missing memberships and revokes
+  others, so changes made in SQL are reverted.
+- Passwords are read from the user's Secret, under any key, and sent as
+  SCRAM-SHA-256 verifiers, never in plain text. A role's password is only
+  changed when its stored verifier doesn't match the Secret.
+- The plugin only ever alters or drops roles carrying its comment, whatever
+  the InstanceUser says. Deleting a user runs `DROP ROLE`; if the role still
+  owns objects or holds privileges, PostgreSQL refuses and its error is shown
+  while the InstanceUser stays `Deleting`, until they're reassigned or dropped.
+- `postgres`, `monitor`, `ccp_monitoring`, `everest-monitor`, `_crunchy*` and
+  the users in the `PerconaPGCluster`'s `spec.users` are listed as system users,
+  even before they exist, and can't be declared: the operator would take them
+  over.
+- Grantable roles are the same predefined roles as for CloudNativePG:
+  `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`. Usernames are at
+  most 63 characters and can't start with `pg_`.
+- The connection string points at PgBouncer (`<cluster>-pgbouncer`) when it
+  runs, like the Instance's own connection details, or else at the primary,
+  with the `postgres` database and `sslmode=require`.
+- Until the `PerconaPGCluster` is `ready`, users stay `Pending`.
 
 ### KServe engine (API keys for models)
 
@@ -300,12 +338,13 @@ done
 
 | Value | Default | Description |
 |---|---|---|
-| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-kserve]` | Providers that get the Users tab |
+| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Users tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
 The chart's ClusterRole lets the backend manage InstanceUsers and Secrets,
 read Instances, get/patch `perconaservermongodbs`, manage CloudNativePG
-`databaseroles` and get `clusters` in every namespace (database namespaces
+`databaseroles`, and get CloudNativePG `clusters` and `perconapgclusters`
+in every namespace (database namespaces
 are created dynamically). It caches only Secrets labeled
 `plugin-user-management.plugins.openeverest.io/instance`; the operator's
 Secrets are read one by one when needed, and a model's API key Secrets are
@@ -359,6 +398,9 @@ kubectl apply -f examples/instanceuser.yaml
 # CloudNativePG, with provider-cloudnative-pg installed:
 kubectl apply -f dev/demo-instance-postgresql.yaml
 kubectl apply -f examples/instanceuser-postgresql.yaml
+# Percona PostgreSQL, with provider-percona-postgresql installed:
+kubectl apply -f dev/demo-instance-percona-postgresql.yaml
+kubectl apply -f examples/instanceuser-percona-postgresql.yaml
 # API keys, with a provider-kserve model exposed through the AI Gateway:
 kubectl apply -f examples/instanceuser-kserve.yaml
 ```
@@ -380,8 +422,8 @@ GitHub release with notes.
 
 ## Roadmap
 
-- Engines for MySQL (`percona-xtradb-cluster`) and Percona PostgreSQL
-  (`provider-percona-postgresql`), through their operators' user APIs.
+- An engine for MySQL (`percona-xtradb-cluster`), through its operator's
+  user API.
 - Per-database PostgreSQL roles (read-only and read-write on one database),
   which need privileges CloudNativePG doesn't declare.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.

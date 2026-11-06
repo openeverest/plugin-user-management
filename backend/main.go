@@ -37,6 +37,7 @@ import (
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/cnpg"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/kserve"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/mongodb"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/perconapg"
 )
 
 // dist/main.js is copied from the frontend build during the Docker build.
@@ -167,9 +168,10 @@ func main() {
 		log.Fatalf("kubernetes dynamic client: %v", err)
 	}
 	engines := map[string]engine.Engine{
-		mongodb.ProviderName: mongodb.New(kube, dyn),
-		cnpg.ProviderName:    cnpg.New(kube, dyn),
-		kserve.ProviderName:  kserve.New(kube, dyn),
+		mongodb.ProviderName:   mongodb.New(kube, dyn),
+		cnpg.ProviderName:      cnpg.New(kube, dyn),
+		perconapg.ProviderName: perconapg.New(kube, dyn),
+		kserve.ProviderName:    kserve.New(kube, dyn),
 	}
 
 	mgr, err := newManager(cfg)
