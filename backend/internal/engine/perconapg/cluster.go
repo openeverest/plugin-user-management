@@ -30,6 +30,9 @@ const (
 // operator would make a superuser and take over once declared.
 var operatorRoles = []string{superuser, "monitor", "ccp_monitoring", "everest-monitor"}
 
+// reservedDatabases are PostgreSQL's own databases.
+var reservedDatabases = []string{defaultDatabase, "template0", "template1"}
+
 // cluster is what the plugin needs from a PerconaPGCluster. The provider
 // names the PerconaPGCluster after the Instance.
 type cluster struct {
@@ -48,6 +51,9 @@ type cluster struct {
 	systemRoles map[string]bool
 	// specUsers are the users declared in spec.users, in order.
 	specUsers []string
+	// systemDatabases are PostgreSQL's own, and those the operator creates
+	// for spec.users.
+	systemDatabases map[string]bool
 	// superuserSecret holds the postgres superuser's credentials.
 	superuserSecret string
 	// tlsSecret holds the server certificate and its CA (ca.crt).
@@ -76,11 +82,15 @@ func clusterFrom(obj *unstructured.Unstructured) cluster {
 		port:            nestedPort(obj, "spec", "port"),
 		pgBouncerHost:   fmt.Sprintf("%s-pgbouncer.%s.svc", name, namespace),
 		systemRoles:     map[string]bool{},
+		systemDatabases: map[string]bool{},
 		superuserSecret: name + "-pguser-" + superuser,
 		tlsSecret:       name + "-cluster-cert",
 	}
 	for _, r := range operatorRoles {
 		c.systemRoles[r] = true
+	}
+	for _, d := range reservedDatabases {
+		c.systemDatabases[d] = true
 	}
 	c.state, _, _ = unstructured.NestedString(obj.Object, "status", "state")
 	c.ready = c.state == stateReady
@@ -105,6 +115,12 @@ func clusterFrom(obj *unstructured.Unstructured) cluster {
 		c.specUsers = append(c.specUsers, name)
 		if secret, _ := user["secretName"].(string); name == superuser && secret != "" {
 			c.superuserSecret = secret
+		}
+		databases, _ := user["databases"].([]any)
+		for _, d := range databases {
+			if db, ok := d.(string); ok && db != "" {
+				c.systemDatabases[db] = true
+			}
 		}
 	}
 

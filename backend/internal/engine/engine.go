@@ -136,6 +136,42 @@ type ConnectionPropertiesProvider interface {
 	ConnectionProperties(ctx context.Context, target Target) (map[string]string, error)
 }
 
+// Database is a database as it exists in the instance.
+type Database struct {
+	Name string
+	// Owner is the username of the database's owner, if the engine has owners.
+	Owner string
+	// System databases are created or declared by the operator or provider.
+	System bool
+}
+
+// DesiredDatabase is a database the plugin manages, as declared by an
+// InstanceDatabase.
+type DesiredDatabase struct {
+	Name string
+	// Owner is the owner's username.
+	Owner string
+}
+
+// DatabaseEngine is implemented by engines that manage the databases of an
+// instance.
+type DatabaseEngine interface {
+	// ValidateDatabase rejects, with ErrInvalid, a database name the engine
+	// can't declare.
+	ValidateDatabase(name string) error
+	// ListDatabases reads the databases that exist in the instance, and those
+	// the operator or provider will create.
+	ListDatabases(ctx context.Context, target Target) ([]Database, error)
+	// SyncDatabase declares the database with its owner. ErrInProgress means
+	// the operator can't apply it yet; the error says why.
+	SyncDatabase(ctx context.Context, target Target, db DesiredDatabase) error
+	// ReleaseDatabase stops managing a database that is no longer declared,
+	// dropping it when drop is set. A missing database is not an error.
+	// ErrInProgress means the release was started and ReleaseDatabase must be
+	// called again until it returns nil.
+	ReleaseDatabase(ctx context.Context, target Target, name string, drop bool) error
+}
+
 // CredentialKindOf returns how users of the engine authenticate.
 func CredentialKindOf(e Engine) CredentialKind {
 	if _, ok := e.(APIKeyEngine); ok {

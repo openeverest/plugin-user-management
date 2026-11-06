@@ -24,9 +24,9 @@ var roleCatalog = []engine.Role{
 const (
 	// PostgreSQL silently truncates longer identifiers (NAMEDATALEN - 1).
 	maxUsernameBytes = 63
-	// roleComment marks the roles the plugin created, so it never alters or
-	// drops a role it doesn't manage.
-	roleComment = "Managed by OpenEverest"
+	// managedComment marks the roles and databases the plugin created, so it
+	// never alters or drops ones it doesn't manage.
+	managedComment = "Managed by OpenEverest"
 	// The attributes of every managed role: it can log in and nothing more.
 	roleAttributes = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
 )
@@ -44,11 +44,9 @@ func isCatalogRole(name string) bool {
 }
 
 // normalizeRoles validates grants and returns them without databases, as
-// predefined roles apply to all databases.
+// predefined roles apply to all databases. A user may have no roles, e.g. the
+// owner of a database.
 func normalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, error) {
-	if len(grants) == 0 {
-		return nil, fmt.Errorf("%w: at least one role is required", engine.ErrInvalid)
-	}
 	seen := map[string]bool{}
 	normalized := make([]engine.RoleGrant, 0, len(grants))
 	for _, g := range grants {
@@ -95,7 +93,7 @@ type roleState struct {
 }
 
 func (s roleState) managed() bool {
-	return s.comment == roleComment
+	return s.comment == managedComment
 }
 
 func (s roleState) hasRoleAttributes() bool {
@@ -123,7 +121,7 @@ func planRole(username string, grants []engine.RoleGrant, password string, curre
 		}
 		stmts = append(stmts,
 			fmt.Sprintf("CREATE ROLE %s WITH %s PASSWORD %s", role, roleAttributes, quoteLiteral(verifier)),
-			fmt.Sprintf("COMMENT ON ROLE %s IS %s", role, quoteLiteral(roleComment)),
+			fmt.Sprintf("COMMENT ON ROLE %s IS %s", role, quoteLiteral(managedComment)),
 		)
 		current = &roleState{}
 	} else {

@@ -39,9 +39,23 @@ type dbRole struct {
 	memberOf []string
 }
 
-// session reads the role catalog of a cluster.
+// Every database with its owner.
+const databasesQuery = `
+SELECT d.datname, pg_catalog.pg_get_userbyid(d.datdba), d.datistemplate
+FROM pg_catalog.pg_database d
+ORDER BY d.datname`
+
+// dbDatabase is a database as the catalog reports it.
+type dbDatabase struct {
+	name     string
+	owner    string
+	template bool
+}
+
+// session reads the role and database catalogs of a cluster.
 type session interface {
 	roles(ctx context.Context) ([]dbRole, error)
+	databases(ctx context.Context) ([]dbDatabase, error)
 	close(ctx context.Context)
 }
 
@@ -126,6 +140,26 @@ func (s *pgxSession) roles(ctx context.Context) ([]dbRole, error) {
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 	return roles, nil
+}
+
+func (s *pgxSession) databases(ctx context.Context) ([]dbDatabase, error) {
+	rows, err := s.conn.Query(ctx, databasesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	defer rows.Close()
+	var dbs []dbDatabase
+	for rows.Next() {
+		var d dbDatabase
+		if err := rows.Scan(&d.name, &d.owner, &d.template); err != nil {
+			return nil, fmt.Errorf("list databases: %w", err)
+		}
+		dbs = append(dbs, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	return dbs, nil
 }
 
 func (s *pgxSession) close(ctx context.Context) {

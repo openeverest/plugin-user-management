@@ -42,11 +42,9 @@ func isCatalogRole(name string) bool {
 }
 
 // normalizeRoles validates grants and returns them without databases, as
-// predefined roles apply to all databases.
+// predefined roles apply to all databases. A user may have no roles, e.g. the
+// owner of a database.
 func normalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, error) {
-	if len(grants) == 0 {
-		return nil, fmt.Errorf("%w: at least one role is required", engine.ErrInvalid)
-	}
 	seen := map[string]bool{}
 	normalized := make([]engine.RoleGrant, 0, len(grants))
 	for _, g := range grants {

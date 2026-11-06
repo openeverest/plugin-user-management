@@ -53,6 +53,7 @@ func passwordSecret(name, key, value string) *corev1.Secret {
 type fakeSession struct {
 	dbRoles  []dbRole
 	state    map[string]*roleState
+	dbs      []dbDatabase
 	executed [][]string
 	execErr  error
 	closed   bool
@@ -62,6 +63,7 @@ func (f *fakeSession) roles(context.Context) ([]dbRole, error) { return f.dbRole
 func (f *fakeSession) role(_ context.Context, name string) (*roleState, error) {
 	return f.state[name], nil
 }
+func (f *fakeSession) databases(context.Context) ([]dbDatabase, error) { return f.dbs, nil }
 func (f *fakeSession) exec(_ context.Context, stmts []string) error {
 	if f.execErr != nil {
 		return f.execErr
@@ -69,7 +71,8 @@ func (f *fakeSession) exec(_ context.Context, stmts []string) error {
 	f.executed = append(f.executed, stmts)
 	return nil
 }
-func (f *fakeSession) close(context.Context) { f.closed = true }
+func (f *fakeSession) execEach(ctx context.Context, stmts []string) error { return f.exec(ctx, stmts) }
+func (f *fakeSession) close(context.Context)                              { f.closed = true }
 
 func newTestEngine(s *fakeSession, obj *unstructured.Unstructured, secrets ...runtime.Object) *Engine {
 	gvrs := map[schema.GroupVersionResource]string{clusterResource: "PerconaPGClusterList"}
@@ -106,8 +109,10 @@ func TestNormalizeRoles(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized = %+v, want %+v", got, want)
 	}
+	if got, err := normalizeRoles(nil); err != nil || len(got) != 0 {
+		t.Fatalf("no roles: %v, %v", got, err)
+	}
 	for name, grants := range map[string][]engine.RoleGrant{
-		"none":             nil,
 		"ungrantable role": {{Role: "pg_execute_server_program"}},
 		"superuser":        {{Role: "postgres"}},
 	} {
@@ -236,7 +241,7 @@ func TestPlanRoleCreate(t *testing.T) {
 func TestPlanRoleExisting(t *testing.T) {
 	verifier := mustVerifier(t, "pw")
 	grants := []engine.RoleGrant{{Role: "pg_read_all_data"}, {Role: "pg_monitor"}}
-	inSync := roleState{login: true, verifier: verifier, comment: roleComment, memberOf: []string{"pg_monitor", "pg_read_all_data"}}
+	inSync := roleState{login: true, verifier: verifier, comment: managedComment, memberOf: []string{"pg_monitor", "pg_read_all_data"}}
 	noVerifier := func(string) (string, error) { return "SCRAM-new", nil }
 
 	stmts, err := planRole("app", grants, "pw", &inSync, noVerifier)
@@ -245,7 +250,7 @@ func TestPlanRoleExisting(t *testing.T) {
 	}
 
 	drifted := roleState{
-		login: true, superuser: true, verifier: verifier, comment: roleComment,
+		login: true, superuser: true, verifier: verifier, comment: managedComment,
 		memberOf: []string{"pg_read_all_data", "pg_write_all_data", "app_owner"},
 	}
 	stmts, err = planRole("app", grants, "new-pw", &drifted, noVerifier)
@@ -391,7 +396,7 @@ func TestListUsers(t *testing.T) {
 func TestDropUser(t *testing.T) {
 	ctx := context.Background()
 	s := &fakeSession{state: map[string]*roleState{
-		"app":   {login: true, comment: roleComment},
+		"app":   {login: true, comment: managedComment},
 		"other": {login: true},
 	}}
 	e := newTestEngine(s, pgCluster(providerSpec(), "ready"))

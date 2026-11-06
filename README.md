@@ -10,7 +10,9 @@ Users are declared as Kubernetes resources, `InstanceUser`, and reconciled
 into the instance's database. Create them from the **Users** tab on the
 instance page or with `kubectl`/GitOps; either way the plugin keeps the
 database in sync, stores generated credentials in a Secret applications can
-mount, and drops the user when the resource is deleted.
+mount, and drops the user when the resource is deleted. On PostgreSQL, the
+databases of an instance and their owners are declared the same way, as
+`InstanceDatabase`s (kubectl/GitOps for now).
 
 Supported providers:
 
@@ -52,6 +54,8 @@ status:
   Editing its `password` rotates the password in the database.
 - `Ready` means the user exists in the database with exactly the declared
   roles. Role changes go back to `Pending` until the database matches.
+  PostgreSQL users may have no roles, such as the owner of an
+  `InstanceDatabase`; other engines require one.
 - Deleting an InstanceUser drops the user from the database (finalizer
   `plugin-user-management.plugins.openeverest.io/drop-user`). InstanceUsers
   are owned by their Instance, so deleting the instance deletes them.
@@ -63,6 +67,53 @@ See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
 (Percona PostgreSQL) and
 [examples/instanceuser-kserve.yaml](examples/instanceuser-kserve.yaml)
 (an API key for a model).
+
+## InstanceDatabase
+
+Supported for `provider-cloudnative-pg` and `provider-percona-postgresql`.
+
+```yaml
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceDatabase
+metadata:
+  name: orders
+  namespace: team-a          # the instance's namespace
+spec:
+  instanceRef:
+    name: orders-db          # immutable
+  name: orders               # immutable; [a-z_][a-z0-9_]*, at most 63
+  owner:
+    instanceUserRef:
+      name: orders-owner     # an InstanceUser of the same instance
+  deletionPolicy: Retain     # Retain (default) | Delete
+status:
+  phase: Ready               # Pending | Ready | Failed | Deleting
+  owner: orders_owner
+  conditions: [{type: Ready, status: "True"}]
+```
+
+- The database is created once the instance is ready and the owner's
+  InstanceUser is `Ready`; until then it's `Pending` with the reason.
+  `Ready` means the database exists with that owner. Changing the owner
+  changes the owner of the database, not of the objects in it.
+- **No takeover**: a database that exists before the plugin claims its name
+  fails, as do PostgreSQL's own databases and those the provider or operator
+  creates. One InstanceDatabase per database name and instance; the oldest
+  wins.
+- Deleting an InstanceDatabase (finalizer
+  `plugin-user-management.plugins.openeverest.io/release-database`) with
+  `Retain` stops managing the database and keeps it, so pruning it from Git
+  never loses data; with `Delete` it drops the database. If PostgreSQL
+  refuses, e.g. while sessions are connected, the InstanceDatabase stays
+  `Deleting` with the reason. InstanceDatabases are owned by their Instance.
+- The owner's InstanceUser can't be deleted while it owns a database:
+  PostgreSQL refuses to drop the role and the InstanceUser stays `Deleting`
+  with the reason until the database is dropped or given another owner.
+- Users connect to any database by default (PostgreSQL grants `CONNECT` to
+  `PUBLIC`); the predefined roles apply to all databases. Per-database roles
+  are planned ([#23](https://github.com/openeverest/plugin-user-management/issues/23)).
+
+See [examples/instancedatabase.yaml](examples/instancedatabase.yaml).
 
 ## How it works
 
@@ -148,6 +199,15 @@ what it depends on (the operator's resources, Secrets).
 - The operator applies a `DatabaseRole` when it or its Secret changes; it
   doesn't revert changes made to the role in SQL. Such drift shows up as
   `Pending` until the user's roles or password change again.
+- Each InstanceDatabase is a CloudNativePG `Database` named
+  `<instance>-<database>-<hash>`, owned by the `Cluster`, labeled with the
+  instance, with the `retain` reclaim policy. Releasing it deletes the
+  `Database`; dropping it switches the policy to `delete` first, and the
+  operator runs `DROP DATABASE`. CloudNativePG's error for a `Database` is
+  shown on the InstanceDatabase.
+- The application database (`spec.bootstrap.initdb.database`) and databases
+  that other `Database` resources declare, such as the provider's own for
+  extensions, are reserved.
 
 ### Percona PostgreSQL engine
 
@@ -183,6 +243,13 @@ itself, and never drops users. So the plugin manages users in SQL and leaves
   runs, like the Instance's own connection details, or else at the primary,
   with the `postgres` database and `sslmode=require`.
 - Until the `PerconaPGCluster` is `ready`, users stay `Pending`.
+- InstanceDatabases are created with `CREATE DATABASE ... OWNER` and
+  commented `Managed by OpenEverest`; owner changes run `ALTER DATABASE ...
+  OWNER TO`. Releasing removes the comment; dropping runs `DROP DATABASE`
+  (without `FORCE`, so connected sessions keep it until they close). Only
+  databases with the comment are ever dropped. The databases listed in
+  `spec.users[].databases`, which the operator creates owned by `postgres`,
+  are reserved.
 
 ### KServe engine (API keys for models)
 
@@ -247,7 +314,9 @@ applied yet. Engines whose users authenticate with API keys implement
 `APIKeyEngine` to generate and validate them (the UI then says "API key"), and
 engines whose clients need more than a URI implement
 `ConnectionPropertiesProvider` to add keys, such as `model`, to the
-credentials Secret.
+credentials Secret. Engines that manage databases implement
+`DatabaseEngine` for InstanceDatabases; others report that databases aren't
+supported.
 
 Engines are keyed by provider name (Instance `spec.providerRef.name`) in
 [backend/main.go](backend/main.go). Prefer declaring users through the
@@ -341,11 +410,12 @@ done
 | `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Users tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
-The chart's ClusterRole lets the backend manage InstanceUsers and Secrets,
-read Instances, get/patch `perconaservermongodbs`, manage CloudNativePG
-`databaseroles`, and get CloudNativePG `clusters` and `perconapgclusters`
-in every namespace (database namespaces
-are created dynamically). It caches only Secrets labeled
+The chart's ClusterRole lets the backend manage InstanceUsers,
+InstanceDatabases and Secrets, read Instances, get/patch
+`perconaservermongodbs`, manage CloudNativePG `databaseroles` and
+`databases`, and get CloudNativePG `clusters` and `perconapgclusters` in
+every namespace (database namespaces are created dynamically). It caches
+only Secrets labeled
 `plugin-user-management.plugins.openeverest.io/instance`; the operator's
 Secrets are read one by one when needed, and a model's API key Secrets are
 listed by label in its namespace.
@@ -398,6 +468,7 @@ kubectl apply -f examples/instanceuser.yaml
 # CloudNativePG, with provider-cloudnative-pg installed:
 kubectl apply -f dev/demo-instance-postgresql.yaml
 kubectl apply -f examples/instanceuser-postgresql.yaml
+kubectl apply -f examples/instancedatabase.yaml
 # Percona PostgreSQL, with provider-percona-postgresql installed:
 kubectl apply -f dev/demo-instance-percona-postgresql.yaml
 kubectl apply -f examples/instanceuser-percona-postgresql.yaml
@@ -425,7 +496,10 @@ GitHub release with notes.
 - An engine for MySQL (`percona-xtradb-cluster`), through its operator's
   user API.
 - Per-database PostgreSQL roles (read-only and read-write on one database),
-  which need privileges CloudNativePG doesn't declare.
+  built on InstanceDatabase owners
+  ([#23](https://github.com/openeverest/plugin-user-management/issues/23)).
+- A Databases tab and API for InstanceDatabases, and InstanceDatabases for
+  other engines.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.
 - Adopting existing database users into an InstanceUser.
 - Configurable role catalog per installation.

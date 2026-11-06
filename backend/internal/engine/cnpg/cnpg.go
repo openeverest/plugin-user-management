@@ -29,11 +29,11 @@ type Engine struct {
 	apply func(ctx context.Context, obj *unstructured.Unstructured) error
 }
 
-// New returns an engine that writes DatabaseRoles, reads Clusters and
-// reads roles with pgx.
+// New returns an engine that writes DatabaseRoles and Databases, reads
+// Clusters and reads roles and databases with pgx.
 func New(kube kubernetes.Interface, dyn dynamic.Interface) *Engine {
 	e := &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube)}
-	e.apply = e.applyDatabaseRole
+	e.apply = e.applyObject
 	return e
 }
 

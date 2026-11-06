@@ -183,8 +183,14 @@ func main() {
 	if err := controller.IndexInstance(ctx, mgr); err != nil {
 		log.Fatalf("index InstanceUsers: %v", err)
 	}
+	if err := controller.IndexDatabaseInstance(ctx, mgr); err != nil {
+		log.Fatalf("index InstanceDatabases: %v", err)
+	}
 	if err := (&controller.Reconciler{Client: mgr.GetClient(), Engines: engines}).SetupWithManager(mgr); err != nil {
 		log.Fatalf("set up controller: %v", err)
+	}
+	if err := (&controller.DatabaseReconciler{Client: mgr.GetClient(), Engines: engines}).SetupWithManager(mgr); err != nil {
+		log.Fatalf("set up database controller: %v", err)
 	}
 
 	s := &server{

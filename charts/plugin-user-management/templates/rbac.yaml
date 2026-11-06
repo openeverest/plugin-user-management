@@ -14,15 +14,15 @@ metadata:
   labels:
     {{- include "plugin-user-management.labels" . | nindent 4 }}
 rules:
-  # The plugin's own API: declared users, reconciled by the backend.
+  # The plugin's own API: declared users and databases, reconciled by the backend.
   - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
-    resources: ["instanceusers"]
+    resources: ["instanceusers", "instancedatabases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
-    resources: ["instanceusers/status"]
+    resources: ["instanceusers/status", "instancedatabases/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["plugin-user-management.plugins.openeverest.io"]
-    resources: ["instanceusers/finalizers"]
+    resources: ["instanceusers/finalizers", "instancedatabases/finalizers"]
     verbs: ["update"]
   # Generated passwords, the operator's user admin credentials and TLS CA.
   # list/watch feed an informer restricted to the plugin's own credentials
@@ -39,12 +39,13 @@ rules:
   - apiGroups: ["psmdb.percona.com"]
     resources: ["perconaservermongodbs"]
     verbs: ["get", "patch"]
-  # CloudNativePG: each user is a DatabaseRole (server-side apply), deleted to
-  # drop the user; DatabaseRoles declared outside the plugin are listed so
-  # their roles are never taken over. The Cluster gives the endpoint, CA,
-  # reserved roles and the DatabaseRoles' owner.
+  # CloudNativePG: each user is a DatabaseRole and each database a Database
+  # (server-side apply), deleted to drop or release them; DatabaseRoles and
+  # Databases declared outside the plugin are listed so they're never taken
+  # over. The Cluster gives the endpoint, CA, reserved roles and databases,
+  # and is their owner.
   - apiGroups: ["postgresql.cnpg.io"]
-    resources: ["databaseroles"]
+    resources: ["databaseroles", "databases"]
     verbs: ["get", "list", "create", "patch", "delete"]
   - apiGroups: ["postgresql.cnpg.io"]
     resources: ["clusters"]

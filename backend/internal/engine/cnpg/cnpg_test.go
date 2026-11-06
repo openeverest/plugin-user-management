@@ -55,11 +55,13 @@ func databaseRole(name string, labels map[string]any, spec, status map[string]an
 
 type fakeSession struct {
 	dbRoles []dbRole
+	dbs     []dbDatabase
 	closed  bool
 }
 
-func (f *fakeSession) roles(context.Context) ([]dbRole, error) { return f.dbRoles, nil }
-func (f *fakeSession) close(context.Context)                   { f.closed = true }
+func (f *fakeSession) roles(context.Context) ([]dbRole, error)         { return f.dbRoles, nil }
+func (f *fakeSession) databases(context.Context) ([]dbDatabase, error) { return f.dbs, nil }
+func (f *fakeSession) close(context.Context)                           { f.closed = true }
 
 type testEngine struct {
 	*Engine
@@ -70,6 +72,7 @@ func newTestEngine(s *fakeSession, objects []runtime.Object, secrets ...runtime.
 	gvrs := map[schema.GroupVersionResource]string{
 		clusterResource:      "ClusterList",
 		databaseRoleResource: "DatabaseRoleList",
+		databaseResource:     "DatabaseList",
 	}
 	te := &testEngine{}
 	te.Engine = &Engine{
@@ -97,9 +100,11 @@ func TestNormalizeRoles(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized = %+v, want %+v", got, want)
 	}
+	if got, err := normalizeRoles(nil); err != nil || len(got) != 0 {
+		t.Fatalf("no roles: %v, %v", got, err)
+	}
 
 	for name, grants := range map[string][]engine.RoleGrant{
-		"none":             nil,
 		"ungrantable role": {{Role: "pg_execute_server_program"}},
 		"superuser":        {{Role: "postgres"}},
 	} {

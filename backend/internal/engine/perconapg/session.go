@@ -57,13 +57,36 @@ type dbRole struct {
 	memberOf []string
 }
 
-// session reads and changes the roles of a cluster.
+// Every database with its owner and comment.
+const databasesQuery = `
+SELECT d.datname, pg_catalog.pg_get_userbyid(d.datdba), d.datistemplate,
+       COALESCE(pg_catalog.shobj_description(d.oid, 'pg_database'), '')
+FROM pg_catalog.pg_database d
+ORDER BY d.datname`
+
+// dbDatabase is a database as the catalog reports it.
+type dbDatabase struct {
+	name     string
+	owner    string
+	template bool
+	comment  string
+}
+
+func (d dbDatabase) managed() bool {
+	return d.comment == managedComment
+}
+
+// session reads and changes the roles and databases of a cluster.
 type session interface {
 	roles(ctx context.Context) ([]dbRole, error)
 	// role returns the role's state, or nil when it doesn't exist.
 	role(ctx context.Context, name string) (*roleState, error)
+	databases(ctx context.Context) ([]dbDatabase, error)
 	// exec runs the statements in one transaction.
 	exec(ctx context.Context, stmts []string) error
+	// execEach runs the statements one by one, outside a transaction, as
+	// CREATE DATABASE and DROP DATABASE require.
+	execEach(ctx context.Context, stmts []string) error
 	close(ctx context.Context)
 }
 
@@ -167,6 +190,35 @@ func (s *pgxSession) exec(ctx context.Context, stmts []string) error {
 		}
 		return nil
 	})
+}
+
+func (s *pgxSession) databases(ctx context.Context) ([]dbDatabase, error) {
+	rows, err := s.conn.Query(ctx, databasesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	defer rows.Close()
+	var dbs []dbDatabase
+	for rows.Next() {
+		var d dbDatabase
+		if err := rows.Scan(&d.name, &d.owner, &d.template, &d.comment); err != nil {
+			return nil, fmt.Errorf("list databases: %w", err)
+		}
+		dbs = append(dbs, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	return dbs, nil
+}
+
+func (s *pgxSession) execEach(ctx context.Context, stmts []string) error {
+	for _, stmt := range stmts {
+		if _, err := s.conn.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *pgxSession) close(ctx context.Context) {
