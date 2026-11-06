@@ -75,11 +75,14 @@ func (r *DatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // databaseState is the outcome of reconciling one InstanceDatabase.
 type databaseState struct {
-	db       *v1alpha1.InstanceDatabase
-	owner    string
-	phase    string
-	message  string
-	declared bool
+	db            *v1alpha1.InstanceDatabase
+	owner         string
+	ownerPassword engine.SecretKeyRef
+	phase         string
+	message       string
+	declared      bool
+	// available is sticky: set once SyncDatabase succeeded.
+	available bool
 	// ownerProblem keeps the database from being declared; a conflict with
 	// an existing database is reported first, as it won't resolve itself.
 	ownerProblem string
@@ -144,7 +147,7 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := ensureInstanceMetadata(ctx, r.Client, db, instance, DatabaseFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
-		s := &databaseState{db: db, declared: db.Status.Declared}
+		s := &databaseState{db: db, declared: db.Status.Declared, available: db.Status.Available}
 		states = append(states, s)
 		if err := eng.ValidateDatabase(db.Spec.Name); err != nil {
 			s.fail(err.Error())
@@ -155,7 +158,7 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			continue
 		}
 		names[db.Spec.Name] = true
-		owner, err := r.ownerUsername(ctx, db)
+		owner, err := r.owner(ctx, db)
 		var pending errOwnerPending
 		var invalid errOwnerInvalid
 		switch {
@@ -166,7 +169,9 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		case err != nil:
 			return ctrl.Result{}, err
 		}
-		s.owner = owner
+		if owner != nil {
+			s.owner, s.ownerPassword = owner.Spec.Username, PasswordRef(owner)
+		}
 	}
 
 	result, err := r.syncDatabases(ctx, eng, target, states, deleting)
@@ -194,29 +199,30 @@ type (
 func (e errOwnerPending) Error() string { return string(e) }
 func (e errOwnerInvalid) Error() string { return string(e) }
 
-// ownerUsername returns the username of the database's owner once the
-// owner's InstanceUser is Ready, or an errOwnerPending or errOwnerInvalid
-// as the state's outcome.
-func (r *DatabaseReconciler) ownerUsername(ctx context.Context, db *v1alpha1.InstanceDatabase) (string, error) {
+// owner returns the InstanceUser owning the database once the plugin has
+// declared it, or an errOwnerPending or errOwnerInvalid as the state's outcome.
+func (r *DatabaseReconciler) owner(ctx context.Context, db *v1alpha1.InstanceDatabase) (*v1alpha1.InstanceUser, error) {
 	name := db.Spec.Owner.InstanceUserRef.Name
 	u := &v1alpha1.InstanceUser{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: db.Namespace, Name: name}, u)
 	if apierrors.IsNotFound(err) {
-		return "", errOwnerPending(fmt.Sprintf("owner InstanceUser %q not found", name))
+		return nil, errOwnerPending(fmt.Sprintf("owner InstanceUser %q not found", name))
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if u.Spec.InstanceRef.Name != db.Spec.InstanceRef.Name {
-		return "", errOwnerInvalid(fmt.Sprintf("owner InstanceUser %q belongs to instance %q", name, u.Spec.InstanceRef.Name))
+		return nil, errOwnerInvalid(fmt.Sprintf("owner InstanceUser %q belongs to instance %q", name, u.Spec.InstanceRef.Name))
 	}
 	if !u.DeletionTimestamp.IsZero() {
-		return "", errOwnerPending(fmt.Sprintf("owner InstanceUser %q is being deleted", name))
+		return nil, errOwnerPending(fmt.Sprintf("owner InstanceUser %q is being deleted", name))
 	}
-	if u.Status.Phase != v1alpha1.PhaseReady {
-		return "", errOwnerPending(fmt.Sprintf("waiting for owner InstanceUser %q to be Ready", name))
+	// The owner's role only needs to exist; waiting for it to be Ready would
+	// deadlock an owner granted a role on its own database.
+	if !u.Status.Declared {
+		return nil, errOwnerPending(fmt.Sprintf("waiting for owner InstanceUser %q to be created", name))
 	}
-	return u.Spec.Username, nil
+	return u, nil
 }
 
 // syncDatabases declares the valid databases, releases deleted ones and
@@ -276,7 +282,7 @@ func (r *DatabaseReconciler) syncDatabases(ctx context.Context, eng engine.Datab
 			}
 		}
 		claimed[name] = true
-		err := eng.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: name, Owner: s.owner})
+		err := eng.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: name, Owner: s.owner, OwnerPassword: s.ownerPassword})
 		switch {
 		case errors.Is(err, engine.ErrInvalid):
 			s.fail(err.Error())
@@ -285,6 +291,7 @@ func (r *DatabaseReconciler) syncDatabases(ctx context.Context, eng engine.Datab
 		case err != nil:
 			return ctrl.Result{}, fmt.Errorf("sync database %q: %w", name, err)
 		default:
+			s.available = true
 			if found, ok := existing[name]; ok && (found.Owner == "" || found.Owner == s.owner) {
 				s.phase = v1alpha1.PhaseReady
 			} else {
@@ -348,6 +355,7 @@ func (r *DatabaseReconciler) writeStatus(ctx context.Context, s *databaseState) 
 		st.Phase = s.phase
 		st.Message = s.message
 		st.Declared = s.declared
+		st.Available = st.Available || s.available
 		st.ObservedGeneration = db.Generation
 		if s.owner != "" {
 			st.Owner = s.owner

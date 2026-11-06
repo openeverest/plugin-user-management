@@ -18,6 +18,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 var target = engine.Target{Namespace: "ns", Instance: "pg"}
@@ -54,6 +55,9 @@ type fakeSession struct {
 	dbRoles  []dbRole
 	state    map[string]*roleState
 	dbs      []dbDatabase
+	schemas  []string
+	objects  []pgaccess.Object
+	dialed   []string
 	executed [][]string
 	execErr  error
 	closed   bool
@@ -72,7 +76,10 @@ func (f *fakeSession) exec(_ context.Context, stmts []string) error {
 	return nil
 }
 func (f *fakeSession) execEach(ctx context.Context, stmts []string) error { return f.exec(ctx, stmts) }
-func (f *fakeSession) close(context.Context)                              { f.closed = true }
+func (f *fakeSession) grantTargets(context.Context, string, string) ([]string, []pgaccess.Object, error) {
+	return f.schemas, f.objects, nil
+}
+func (f *fakeSession) close(context.Context) { f.closed = true }
 
 func newTestEngine(s *fakeSession, obj *unstructured.Unstructured, secrets ...runtime.Object) *Engine {
 	gvrs := map[schema.GroupVersionResource]string{clusterResource: "PerconaPGClusterList"}
@@ -83,7 +90,12 @@ func newTestEngine(s *fakeSession, obj *unstructured.Unstructured, secrets ...ru
 	return &Engine{
 		kube: kubefake.NewClientset(secrets...),
 		dyn:  dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrs, objects...),
-		dial: func(context.Context, cluster) (session, error) { return s, nil },
+		dial: func(_ context.Context, _ cluster, database string) (session, error) {
+			if s != nil {
+				s.dialed = append(s.dialed, database)
+			}
+			return s, nil
+		},
 	}
 }
 
@@ -222,7 +234,7 @@ func TestVerifier(t *testing.T) {
 }
 
 func TestPlanRoleCreate(t *testing.T) {
-	grants := []engine.RoleGrant{{Role: "pg_read_all_data"}, {Role: "pg_monitor"}}
+	grants := []string{"pg_read_all_data", "pg_monitor"}
 	stmts, err := planRole(`app"x`, grants, "pw", nil, func(string) (string, error) { return "SCRAM-v", nil })
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +252,7 @@ func TestPlanRoleCreate(t *testing.T) {
 
 func TestPlanRoleExisting(t *testing.T) {
 	verifier := mustVerifier(t, "pw")
-	grants := []engine.RoleGrant{{Role: "pg_read_all_data"}, {Role: "pg_monitor"}}
+	grants := []string{"pg_read_all_data", "pg_monitor"}
 	inSync := roleState{login: true, verifier: verifier, comment: managedComment, memberOf: []string{"pg_monitor", "pg_read_all_data"}}
 	noVerifier := func(string) (string, error) { return "SCRAM-new", nil }
 
@@ -448,5 +460,75 @@ func TestConnectionURI(t *testing.T) {
 	}
 	if !strings.Contains(uri, "@pg-primary.ns.svc:5432/postgres") {
 		t.Fatalf("uri = %s", uri)
+	}
+}
+
+func TestNormalizeDatabaseRoles(t *testing.T) {
+	got, err := normalizeRoles([]engine.RoleGrant{
+		{Role: "read", Database: "orders"},
+		{Role: "read", Database: "orders"},
+		{Role: "readWrite", Database: "billing"},
+		{Role: "pg_monitor", Database: "ignored"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []engine.RoleGrant{{Role: "read", Database: "orders"}, {Role: "readWrite", Database: "billing"}, {Role: "pg_monitor"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized = %+v, want %+v", got, want)
+	}
+	for name, grants := range map[string][]engine.RoleGrant{
+		"no database":      {{Role: "read"}},
+		"invalid database": {{Role: "readWrite", Database: "Orders-DB"}},
+	} {
+		if _, err := normalizeRoles(grants); !errors.Is(err, engine.ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+	if err := validateUser(engine.DesiredUser{Username: "oe_orders_read"}); !errors.Is(err, engine.ErrInvalid) {
+		t.Errorf("group role name accepted as a username: %v", err)
+	}
+}
+
+func TestSyncUsersDatabaseRoles(t *testing.T) {
+	s := &fakeSession{state: map[string]*roleState{}}
+	e := newTestEngine(s, pgCluster(providerSpec(), "ready"), passwordSecret("p", "password", "pw"))
+	users := []engine.DesiredUser{{
+		Username: "app",
+		Roles:    []engine.RoleGrant{{Role: "read", Database: "orders"}, {Role: "readWrite", Database: "billing"}, {Role: "pg_monitor"}},
+		Password: engine.SecretKeyRef{Name: "p", Key: "password"},
+	}}
+	if err := e.SyncUsers(context.Background(), target, users); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.executed) != 1 {
+		t.Fatalf("executed = %q", s.executed)
+	}
+	want := []string{`GRANT "oe_orders_read" TO "app"`, `GRANT "oe_billing_readwrite" TO "app"`, `GRANT "pg_monitor" TO "app"`}
+	if got := s.executed[0][2:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("grants = %q, want %q", got, want)
+	}
+}
+
+func TestListUsersDatabaseRoles(t *testing.T) {
+	s := &fakeSession{
+		dbRoles: []dbRole{
+			{name: "app", memberOf: []string{"oe_orders_read", "pg_monitor", "oe_gone_read"}},
+			{name: "oe_orders_read"},
+		},
+		dbs: []dbDatabase{{name: "orders"}, {name: "postgres"}},
+	}
+	users, err := newTestEngine(s, pgCluster(providerSpec(), "ready")).ListUsers(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []engine.User{
+		// A group of a database that no longer exists isn't a grant on it.
+		{Username: "app", Roles: []engine.RoleGrant{{Role: "read", Database: "orders"}, {Role: "pg_monitor"}, {Role: "oe_gone_read"}}},
+		{Username: "oe_orders_read", Roles: []engine.RoleGrant{}, System: true},
+		{Username: "postgres", Roles: []engine.RoleGrant{}, System: true},
+	}
+	if !reflect.DeepEqual(users, want) {
+		t.Fatalf("users =\n%+v\nwant\n%+v", users, want)
 	}
 }

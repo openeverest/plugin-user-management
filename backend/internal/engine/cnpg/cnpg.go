@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 // ProviderName is the provider (Instance spec.providerRef.name) this engine serves.
@@ -23,16 +24,17 @@ const ProviderName = "provider-cloudnative-pg"
 
 // Engine implements engine.Engine for CloudNativePG.
 type Engine struct {
-	kube  kubernetes.Interface
-	dyn   dynamic.Interface
-	dial  dialer
-	apply func(ctx context.Context, obj *unstructured.Unstructured) error
+	kube   kubernetes.Interface
+	dyn    dynamic.Interface
+	dial   dialer
+	dialAs userDialer
+	apply  func(ctx context.Context, obj *unstructured.Unstructured) error
 }
 
 // New returns an engine that writes DatabaseRoles and Databases, reads
 // Clusters and reads roles and databases with pgx.
 func New(kube kubernetes.Interface, dyn dynamic.Interface) *Engine {
-	e := &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube)}
+	e := &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube), dialAs: pgxUserDialer(kube)}
 	e.apply = e.applyObject
 	return e
 }
@@ -92,7 +94,8 @@ func (e *Engine) declareUser(ctx context.Context, c cluster, user engine.Desired
 
 // ListUsers implements engine.Engine. Roles that other DatabaseRoles or the
 // Cluster spec declare are listed even before the operator creates them, so
-// the plugin never declares, and takes over, the same role.
+// the plugin never declares, and takes over, the same role. Memberships of
+// the per-database group roles are reported as database-scoped grants.
 func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.User, error) {
 	c, err := e.resolve(ctx, target)
 	if err != nil {
@@ -110,11 +113,23 @@ func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.
 	if err != nil {
 		return nil, err
 	}
+	dbs, err := s.databases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	databases := make([]string, 0, len(dbs))
+	for _, d := range dbs {
+		databases = append(databases, d.name)
+	}
 
 	users := make([]engine.User, 0, len(dbRoles))
 	listed := map[string]bool{}
 	for _, r := range dbRoles {
-		users = append(users, engine.User{Username: r.name, Roles: grantsOf(r.memberOf), System: c.isSystemRole(r.name)})
+		users = append(users, engine.User{
+			Username: r.name,
+			Roles:    pgaccess.Grants(r.memberOf, databases),
+			System:   c.isSystemRole(r.name) || pgaccess.IsGroupRole(r.name),
+		})
 		listed[r.name] = true
 	}
 	foreign, err := e.foreignRoles(ctx, c)

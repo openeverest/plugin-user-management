@@ -13,16 +13,15 @@ import (
 	"net"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 // ProviderName is the provider (Instance spec.providerRef.name) this engine serves.
@@ -68,7 +67,12 @@ func problemKey(target engine.Target, username string) string {
 	return target.Namespace + "/" + target.Instance + "/" + username
 }
 
+// connect connects to the postgres database once the cluster is ready.
 func (e *Engine) connect(ctx context.Context, target engine.Target) (cluster, session, error) {
+	return e.connectTo(ctx, target, defaultDatabase)
+}
+
+func (e *Engine) connectTo(ctx context.Context, target engine.Target, database string) (cluster, session, error) {
 	c, err := e.resolve(ctx, target)
 	if err != nil {
 		return cluster{}, nil, err
@@ -80,7 +84,7 @@ func (e *Engine) connect(ctx context.Context, target engine.Target) (cluster, se
 		}
 		return cluster{}, nil, fmt.Errorf("%w: PostgreSQL cluster is %q", engine.ErrNotReady, state)
 	}
-	s, err := e.dial(ctx, c)
+	s, err := e.dial(ctx, c, database)
 	if err != nil {
 		return cluster{}, nil, err
 	}
@@ -137,7 +141,7 @@ func (e *Engine) declareUser(ctx context.Context, c cluster, s session, user eng
 	if err != nil {
 		return "", err
 	}
-	stmts, err := planRole(user.Username, roles, password, current, newVerifier)
+	stmts, err := planRole(user.Username, pgaccess.MemberOf(roles), password, current, newVerifier)
 	var unmanaged errUnmanagedRole
 	if errors.As(err, &unmanaged) {
 		return unmanaged.Error(), nil
@@ -146,7 +150,7 @@ func (e *Engine) declareUser(ctx context.Context, c cluster, s session, user eng
 		return "", err
 	}
 	if err := s.exec(ctx, stmts); err != nil {
-		if reason := postgresReason(err); reason != "" {
+		if reason := pgaccess.ServerReason(err); reason != "" {
 			return "PostgreSQL can't apply the user: " + reason, nil
 		}
 		return "", err
@@ -171,22 +175,10 @@ func (e *Engine) readPassword(ctx context.Context, namespace string, ref engine.
 	return password, "", nil
 }
 
-// postgresReason is the server's error message, or "" when err didn't come
-// from the server.
-func postgresReason(err error) string {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		return ""
-	}
-	if pgErr.Detail == "" {
-		return pgErr.Message
-	}
-	return pgErr.Message + ": " + strings.ReplaceAll(strings.TrimSpace(pgErr.Detail), "\n", "; ")
-}
-
 // ListUsers implements engine.Engine. Users declared in spec.users are
 // listed even before the operator creates them, so the plugin never
-// declares, and takes over, the same role.
+// declares, and takes over, the same role. Memberships of the per-database
+// group roles are reported as database-scoped grants.
 func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.User, error) {
 	c, s, err := e.connect(ctx, target)
 	if err != nil {
@@ -197,11 +189,23 @@ func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.
 	if err != nil {
 		return nil, err
 	}
+	dbs, err := s.databases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	databases := make([]string, 0, len(dbs))
+	for _, d := range dbs {
+		databases = append(databases, d.name)
+	}
 
 	users := make([]engine.User, 0, len(dbRoles))
 	listed := map[string]bool{}
 	for _, r := range dbRoles {
-		users = append(users, engine.User{Username: r.name, Roles: grantsOf(r.memberOf), System: c.isSystemRole(r.name)})
+		users = append(users, engine.User{
+			Username: r.name,
+			Roles:    pgaccess.Grants(r.memberOf, databases),
+			System:   c.isSystemRole(r.name) || pgaccess.IsGroupRole(r.name),
+		})
 		listed[r.name] = true
 	}
 	for _, name := range c.specUsers {
@@ -237,7 +241,7 @@ func (e *Engine) DropUser(ctx context.Context, target engine.Target, username st
 		return nil
 	}
 	if err := s.exec(ctx, []string{"DROP ROLE IF EXISTS " + quoteIdent(username)}); err != nil {
-		if reason := postgresReason(err); reason != "" {
+		if reason := pgaccess.ServerReason(err); reason != "" {
 			return fmt.Errorf("%w: PostgreSQL can't drop the role: %s", engine.ErrInProgress, reason)
 		}
 		return err

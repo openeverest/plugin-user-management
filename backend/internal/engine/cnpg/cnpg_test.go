@@ -18,6 +18,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 var target = engine.Target{Namespace: "ns", Instance: "pg"}
@@ -54,14 +55,29 @@ func databaseRole(name string, labels map[string]any, spec, status map[string]an
 }
 
 type fakeSession struct {
-	dbRoles []dbRole
-	dbs     []dbDatabase
-	closed  bool
+	dbRoles  []dbRole
+	dbs      []dbDatabase
+	objects  []pgaccess.Object
+	executed [][]string
+	execErr  error
+	// dialedAs records database/user of the connections made as a user.
+	dialedAs []string
+	closed   bool
 }
 
 func (f *fakeSession) roles(context.Context) ([]dbRole, error)         { return f.dbRoles, nil }
 func (f *fakeSession) databases(context.Context) ([]dbDatabase, error) { return f.dbs, nil }
 func (f *fakeSession) close(context.Context)                           { f.closed = true }
+func (f *fakeSession) grantTargets(context.Context, string, string) ([]string, []pgaccess.Object, error) {
+	return nil, f.objects, nil
+}
+func (f *fakeSession) exec(_ context.Context, stmts []string) error {
+	if f.execErr != nil {
+		return f.execErr
+	}
+	f.executed = append(f.executed, stmts)
+	return nil
+}
 
 type testEngine struct {
 	*Engine
@@ -79,6 +95,10 @@ func newTestEngine(s *fakeSession, objects []runtime.Object, secrets ...runtime.
 		kube: kubefake.NewClientset(secrets...),
 		dyn:  dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrs, objects...),
 		dial: func(context.Context, cluster) (session, error) { return s, nil },
+		dialAs: func(_ context.Context, _ cluster, database, user, password string) (session, error) {
+			s.dialedAs = append(s.dialedAs, database+"/"+user+"/"+password)
+			return s, nil
+		},
 		apply: func(_ context.Context, obj *unstructured.Unstructured) error {
 			te.applied = append(te.applied, obj)
 			return nil

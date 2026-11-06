@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 var databaseRoleResource = schema.GroupVersionResource{Group: "postgresql.cnpg.io", Version: "v1", Resource: "databaseroles"}
@@ -54,8 +55,8 @@ func databaseRoleName(instance, username string) string {
 // DatabaseRole so it doesn't outlive it.
 func databaseRoleApplyConfiguration(c cluster, user engine.DesiredUser) *unstructured.Unstructured {
 	inRoles := make([]any, 0, len(user.Roles))
-	for _, g := range user.Roles {
-		inRoles = append(inRoles, g.Role)
+	for _, r := range pgaccess.MemberOf(user.Roles) {
+		inRoles = append(inRoles, r)
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": databaseRoleResource.GroupVersion().String(),

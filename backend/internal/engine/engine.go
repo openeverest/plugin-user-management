@@ -160,6 +160,9 @@ type DesiredDatabase struct {
 	Name string
 	// Owner is the owner's username.
 	Owner string
+	// OwnerPassword is where the owner's password is kept, for engines that
+	// act in the database as its owner.
+	OwnerPassword SecretKeyRef
 }
 
 // DatabaseEngine is implemented by engines that manage the databases of an

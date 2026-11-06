@@ -114,6 +114,12 @@ spec:
           status:
             description: InstanceDatabaseStatus is the observed state of an InstanceDatabase.
             properties:
+              available:
+                description: |-
+                  Available is set once the database and the roles that grant access to
+                  it have been applied. Users can be granted roles on it from then on,
+                  even while it's Pending again, e.g. during an owner change.
+                type: boolean
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

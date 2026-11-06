@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 const (
@@ -87,10 +88,14 @@ type session interface {
 	// execEach runs the statements one by one, outside a transaction, as
 	// CREATE DATABASE and DROP DATABASE require.
 	execEach(ctx context.Context, stmts []string) error
+	// grantTargets runs pgaccess.SchemasQuery and pgaccess.ObjectsQuery for
+	// the groups in the session's database.
+	grantTargets(ctx context.Context, read, readWrite string) ([]string, []pgaccess.Object, error)
 	close(ctx context.Context)
 }
 
-type dialer func(ctx context.Context, c cluster) (session, error)
+// dialer connects to a database of the cluster.
+type dialer func(ctx context.Context, c cluster, database string) (session, error)
 
 type pgxSession struct {
 	conn *pgx.Conn
@@ -99,7 +104,7 @@ type pgxSession struct {
 // pgxDialer connects to the primary as the postgres superuser, which the
 // provider always declares, over TLS verified against the cluster's CA.
 func pgxDialer(kube kubernetes.Interface) dialer {
-	return func(ctx context.Context, c cluster) (session, error) {
+	return func(ctx context.Context, c cluster, database string) (session, error) {
 		secrets := kube.CoreV1().Secrets(c.namespace)
 		creds, err := secrets.Get(ctx, c.superuserSecret, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -116,7 +121,7 @@ func pgxDialer(kube kubernetes.Interface) dialer {
 			Scheme:   "postgres",
 			User:     url.UserPassword(user, password),
 			Host:     net.JoinHostPort(c.host, strconv.FormatInt(c.port, 10)),
-			Path:     "/" + defaultDatabase,
+			Path:     "/" + database,
 			RawQuery: url.Values{"sslmode": {"require"}}.Encode(),
 		}
 		cfg, err := pgx.ParseConfig(dsn.String())
@@ -219,6 +224,30 @@ func (s *pgxSession) execEach(ctx context.Context, stmts []string) error {
 		}
 	}
 	return nil
+}
+
+func (s *pgxSession) grantTargets(ctx context.Context, read, readWrite string) ([]string, []pgaccess.Object, error) {
+	rows, err := s.conn.Query(ctx, pgaccess.SchemasQuery, read, readWrite)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list schemas: %w", err)
+	}
+	schemas, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, nil, fmt.Errorf("list schemas: %w", err)
+	}
+	rows, err = s.conn.Query(ctx, pgaccess.ObjectsQuery, read, readWrite)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list objects: %w", err)
+	}
+	objects, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (pgaccess.Object, error) {
+		var o pgaccess.Object
+		err := row.Scan(&o.Name, &o.Sequence)
+		return o, err
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("list objects: %w", err)
+	}
+	return schemas, objects, nil
 }
 
 func (s *pgxSession) close(ctx context.Context) {

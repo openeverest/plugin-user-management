@@ -55,7 +55,9 @@ status:
 - `Ready` means the user exists in the database with exactly the declared
   roles. Role changes go back to `Pending` until the database matches.
   PostgreSQL users may have no roles, such as the owner of an
-  `InstanceDatabase`; other engines require one.
+  `InstanceDatabase`; other engines require one. On PostgreSQL, `read` and
+  `readWrite` are granted on one InstanceDatabase (see
+  [Per-database roles](#per-database-roles)).
 - Deleting an InstanceUser drops the user from the database (finalizer
   `plugin-user-management.plugins.openeverest.io/drop-user`). InstanceUsers
   are owned by their Instance, so deleting the instance deletes them.
@@ -89,11 +91,15 @@ spec:
 status:
   phase: Ready               # Pending | Ready | Failed | Deleting
   owner: orders_owner
+  available: true            # applied at least once
   conditions: [{type: Ready, status: "True"}]
 ```
 
 - The database is created once the instance is ready and the owner's
-  InstanceUser is `Ready`; until then it's `Pending` with the reason.
+  InstanceUser has been created in it (it may still be `Pending`, e.g.
+  waiting for a role on this very database); until then it's `Pending` with
+  the reason. `status.available` is set once the database and its roles
+  have been applied, and stays set.
   `Ready` means the database exists with that owner. Changing the owner
   changes the owner of the database, not of the objects in it.
 - **No takeover**: a database that exists before the plugin claims its name
@@ -110,9 +116,41 @@ status:
 - The owner's InstanceUser can't be deleted while it owns a database:
   PostgreSQL refuses to drop the role and the InstanceUser stays `Deleting`
   with the reason until the database is dropped or given another owner.
-- Users connect to any database by default (PostgreSQL grants `CONNECT` to
-  `PUBLIC`); the predefined roles apply to all databases. Per-database roles
-  are planned ([#23](https://github.com/openeverest/plugin-user-management/issues/23)).
+- Users get access to one database with the `read` and `readWrite` roles on
+  it (see [Per-database roles](#per-database-roles)).
+- Users can still connect to any database (PostgreSQL grants `CONNECT` to
+  `PUBLIC`), but without a role on it they can't read or change its tables.
+
+### Per-database roles
+
+```yaml
+kind: InstanceUser
+spec:
+  instanceRef: {name: orders-db}
+  username: orders_app
+  roles:
+    - role: readWrite        # or read
+      database: orders       # an InstanceDatabase of the same instance
+```
+
+- `read` reads the database's tables, views and sequences; `readWrite` also
+  inserts, updates and deletes rows and uses sequences. Neither can create,
+  alter or drop objects: that's the owner's.
+- They cover the objects that exist and those the **owner creates later**
+  (default privileges), in every schema the owner creates. Migrations should
+  run as the owner, or `SET ROLE` to it; objects created by other users aren't
+  covered.
+- Each InstanceDatabase gets two group roles, `oe_<database>_read` and
+  `oe_<database>_readwrite` (hashed when longer than 63 characters), holding
+  those privileges; granting a role makes the user a member, so revoking it
+  takes effect right away. They're listed as system users, and usernames
+  can't start with `oe_`.
+- A user granted a role on a database whose InstanceDatabase hasn't been
+  applied yet (`status.available`) is declared with its other roles and
+  stays `Pending` until it has. Once available, the roles stay granted even
+  while the InstanceDatabase is briefly `Pending`, e.g. during an owner
+  change. Deleting the InstanceDatabase revokes them; dropping the database
+  drops its group roles.
 
 See [examples/instancedatabase.yaml](examples/instancedatabase.yaml).
 
@@ -190,11 +228,17 @@ what it depends on (the operator's resources, Secrets).
   in the Cluster's `spec.managed.roles` are listed as system users. Roles
   declared by other `DatabaseRole`s are listed too, even before they exist, so
   the plugin never declares the same role.
-- Grantable roles are PostgreSQL's predefined roles, which apply to all
-  databases: `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`.
-  CloudNativePG declares memberships but not object privileges, so there are
-  no per-database roles yet. Usernames are at most 63 characters and can't be
-  `postgres`, `streaming_replica` or start with `pg_` or `cnpg_`.
+- Grantable roles are `read` and `readWrite` on one InstanceDatabase, and
+  PostgreSQL's predefined roles, which apply to all databases:
+  `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`. Usernames are at
+  most 63 characters and can't be `postgres`, `streaming_replica` or start
+  with `pg_`, `cnpg_` or `oe_`.
+- An InstanceDatabase's group roles are `DatabaseRole`s like users', without
+  login. CloudNativePG declares memberships but not object privileges, so the
+  plugin grants the group roles theirs itself, connected to the database **as
+  its owner** with the owner's password: no superuser access is needed. It
+  grants on the objects the owner owns that lack a privilege, and sets the
+  owner's default privileges.
 - The connection string points at the read-write service and the
   application database, with `sslmode=require`.
 - The operator applies a `DatabaseRole` when it or its Secret changes; it
@@ -238,9 +282,13 @@ itself, and never drops users. So the plugin manages users in SQL and leaves
   the users in the `PerconaPGCluster`'s `spec.users` are listed as system users,
   even before they exist, and can't be declared: the operator would take them
   over.
-- Grantable roles are the same predefined roles as for CloudNativePG:
-  `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`. Usernames are at
-  most 63 characters and can't start with `pg_`.
+- Grantable roles are the same as for CloudNativePG: `read` and `readWrite`
+  on one InstanceDatabase, `pg_read_all_data`, `pg_write_all_data` and
+  `pg_monitor`. Usernames are at most 63 characters and can't start with
+  `pg_` or `oe_`.
+- An InstanceDatabase's group roles are created with `CREATE ROLE ... NOLOGIN`
+  and the plugin's comment, and get their privileges from the superuser, on
+  every object that lacks one, with the owner's default privileges.
 - The connection string points at PgBouncer (`<cluster>-pgbouncer`) when it
   runs, like the Instance's own connection details, or else at the primary,
   with the `postgres` database and `sslmode=require`.
@@ -369,11 +417,12 @@ helm install plugin-user-management charts/plugin-user-management \
   --namespace everest-system
 ```
 
-Helm installs the InstanceUser CRD from `crds/` but never upgrades or deletes
-it. On upgrades apply it first:
+Helm installs the CRDs (InstanceUser, InstanceDatabase) from `crds/` but
+never upgrades or deletes them. On upgrades apply them first; Helm owns
+their fields, so take them over:
 
 ```bash
-kubectl apply --server-side -f charts/plugin-user-management/crds
+kubectl apply --server-side --force-conflicts -f charts/plugin-user-management/crds
 ```
 
 ### Upgrading from 0.1.x
@@ -467,7 +516,7 @@ current kubeconfig context:
 
 ```bash
 make dev-registry     # throwaway in-cluster registry (dev/registry.yaml)
-make dev-deploy       # build, push to it, apply the CRD, helm upgrade --install
+make dev-deploy       # build, push to it, apply the CRDs, helm upgrade --install
 kubectl create namespace um-test && kubectl apply -f dev/demo-instance.yaml
 kubectl apply -f examples/instanceuser.yaml
 # CloudNativePG, with provider-cloudnative-pg installed:
@@ -500,11 +549,10 @@ GitHub release with notes.
 
 - An engine for MySQL (`percona-xtradb-cluster`), through its operator's
   user API.
-- Per-database PostgreSQL roles (read-only and read-write on one database),
-  built on InstanceDatabase owners
-  ([#23](https://github.com/openeverest/plugin-user-management/issues/23)).
 - A Databases tab and API for InstanceDatabases, and InstanceDatabases for
   other engines.
+- Optionally restricting `CONNECT` on an InstanceDatabase to its owner and
+  the users granted a role on it, instead of `PUBLIC`.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.
 - Adopting existing database users into an InstanceUser.
 - Configurable role catalog per installation.

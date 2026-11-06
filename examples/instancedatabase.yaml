@@ -29,3 +29,18 @@ spec:
   # Retain (default) keeps the database and its data when this resource is
   # deleted; Delete drops it.
   deletionPolicy: Retain
+---
+# The orders service reads and writes the orders database, including the
+# tables orders-owner creates later, and nothing else.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceUser
+metadata:
+  name: orders-app
+  namespace: um-test
+spec:
+  instanceRef:
+    name: pg-users
+  username: orders_app
+  roles:
+    - role: readWrite        # or read
+      database: orders

@@ -8,18 +8,20 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
-// The roles the plugin grants: PostgreSQL predefined roles, which apply to
-// every database of the instance, as for CloudNativePG. Deliberately
-// excludes superuser, createrole, replication, bypassrls and the predefined
-// roles that reach the server's files or programs: those would let anyone who
-// can use the plugin mint a superuser.
-var roleCatalog = []engine.Role{
-	{Name: "pg_read_all_data", Scope: engine.ScopeCluster, Description: "Read all tables, views and sequences in all databases."},
-	{Name: "pg_write_all_data", Scope: engine.ScopeCluster, Description: "Insert, update and delete rows in all tables in all databases; add pg_read_all_data to read them."},
-	{Name: "pg_monitor", Scope: engine.ScopeCluster, Description: "Read monitoring views and statistics."},
-}
+// The roles the plugin grants, as for CloudNativePG: read and readWrite on
+// one InstanceDatabase, and PostgreSQL predefined roles, which apply to
+// every database of the instance. Deliberately excludes superuser,
+// createrole, replication, bypassrls and the predefined roles that reach the
+// server's files or programs: those would let anyone who can use the plugin
+// mint a superuser.
+var roleCatalog = append(slices.Clone(pgaccess.Roles),
+	engine.Role{Name: "pg_read_all_data", Scope: engine.ScopeCluster, Description: "Read all tables, views and sequences in all databases."},
+	engine.Role{Name: "pg_write_all_data", Scope: engine.ScopeCluster, Description: "Insert, update and delete rows in all tables in all databases; add pg_read_all_data to read them."},
+	engine.Role{Name: "pg_monitor", Scope: engine.ScopeCluster, Description: "Read monitoring views and statistics."},
+)
 
 const (
 	// PostgreSQL silently truncates longer identifiers (NAMEDATALEN - 1).
@@ -31,8 +33,9 @@ const (
 	roleAttributes = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
 )
 
-// PostgreSQL reserves pg_ role names; the operator's own roles start with _crunchy.
-var reservedUsernamePrefixes = []string{"pg_", operatorPrefix}
+// PostgreSQL reserves pg_ role names; the operator's own roles start with
+// _crunchy, and the plugin's per-database group roles with oe_.
+var reservedUsernamePrefixes = []string{"pg_", operatorPrefix, pgaccess.GroupPrefix}
 
 func isCatalogRole(name string) bool {
 	for _, r := range roleCatalog {
@@ -43,19 +46,26 @@ func isCatalogRole(name string) bool {
 	return false
 }
 
-// normalizeRoles validates grants and returns them without databases, as
-// predefined roles apply to all databases. A user may have no roles, e.g. the
-// owner of a database.
+// normalizeRoles validates grants. Database-scoped roles keep their
+// database; predefined roles apply to all databases and lose theirs. A user
+// may have no roles, e.g. the owner of a database.
 func normalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, error) {
-	seen := map[string]bool{}
+	seen := map[engine.RoleGrant]bool{}
 	normalized := make([]engine.RoleGrant, 0, len(grants))
 	for _, g := range grants {
 		if !isCatalogRole(g.Role) {
 			return nil, fmt.Errorf("%w: role %q can't be granted", engine.ErrInvalid, g.Role)
 		}
-		if !seen[g.Role] {
-			seen[g.Role] = true
-			normalized = append(normalized, engine.RoleGrant{Role: g.Role})
+		grant := engine.RoleGrant{Role: g.Role}
+		if pgaccess.IsDatabaseRole(g.Role) {
+			var err error
+			if grant, err = pgaccess.NormalizeGrant(g); err != nil {
+				return nil, err
+			}
+		}
+		if !seen[grant] {
+			seen[grant] = true
+			normalized = append(normalized, grant)
 		}
 	}
 	return normalized, nil
@@ -108,10 +118,10 @@ func (e errUnmanagedRole) Error() string {
 }
 
 // planRole returns the statements that make the role match the user: a
-// login role with only the granted memberships and the given password. A
+// login role that is a member of exactly memberOf, with the given password. A
 // nil current means the role doesn't exist yet. newVerifier hashes the
 // password, so it never reaches the server, or its logs, in plain text.
-func planRole(username string, grants []engine.RoleGrant, password string, current *roleState, newVerifier func(string) (string, error)) ([]string, error) {
+func planRole(username string, memberOf []string, password string, current *roleState, newVerifier func(string) (string, error)) ([]string, error) {
 	role := quoteIdent(username)
 	var stmts []string
 	if current == nil {
@@ -141,10 +151,10 @@ func planRole(username string, grants []engine.RoleGrant, password string, curre
 	}
 
 	desired := map[string]bool{}
-	for _, g := range grants {
-		desired[g.Role] = true
-		if !slices.Contains(current.memberOf, g.Role) {
-			stmts = append(stmts, fmt.Sprintf("GRANT %s TO %s", quoteIdent(g.Role), role))
+	for _, r := range memberOf {
+		desired[r] = true
+		if !slices.Contains(current.memberOf, r) {
+			stmts = append(stmts, fmt.Sprintf("GRANT %s TO %s", quoteIdent(r), role))
 		}
 	}
 	for _, r := range current.memberOf {
@@ -163,12 +173,4 @@ func quoteIdent(name string) string {
 // as it is by default.
 func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
-func grantsOf(roles []string) []engine.RoleGrant {
-	grants := make([]engine.RoleGrant, 0, len(roles))
-	for _, r := range roles {
-		grants = append(grants, engine.RoleGrant{Role: r})
-	}
-	return grants
 }

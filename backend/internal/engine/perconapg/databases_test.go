@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 func TestValidateDatabase(t *testing.T) {
@@ -78,7 +79,7 @@ func TestPlanDatabase(t *testing.T) {
 
 func TestSyncDatabase(t *testing.T) {
 	ctx := context.Background()
-	s := &fakeSession{}
+	s := &fakeSession{objects: []pgaccess.Object{{Name: "public.sales"}, {Name: "public.sales_id_seq", Sequence: true}}}
 	spec := providerSpec()
 	spec["users"] = append(spec["users"].([]any), map[string]any{"name": "app", "databases": []any{"appdb"}})
 	e := newTestEngine(s, pgCluster(spec, "ready"))
@@ -86,15 +87,39 @@ func TestSyncDatabase(t *testing.T) {
 	if err := e.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: "orders", Owner: "o"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.executed) != 1 || s.executed[0][0] != `CREATE DATABASE "orders" OWNER "o"` {
-		t.Fatalf("executed = %v", s.executed)
+	want := [][]string{
+		{`CREATE DATABASE "orders" OWNER "o"`, `COMMENT ON DATABASE "orders" IS 'Managed by OpenEverest'`},
+		{`CREATE ROLE "oe_orders_read" WITH NOLOGIN`, `COMMENT ON ROLE "oe_orders_read" IS 'Managed by OpenEverest'`},
+		{`CREATE ROLE "oe_orders_readwrite" WITH NOLOGIN`, `COMMENT ON ROLE "oe_orders_readwrite" IS 'Managed by OpenEverest'`},
+		pgaccess.PrivilegeStatements("orders", "o", nil, s.objects),
 	}
+	if !reflect.DeepEqual(s.executed, want) {
+		t.Fatalf("executed =\n%q\nwant\n%q", s.executed, want)
+	}
+	// Access is granted in the database itself.
+	if !reflect.DeepEqual(s.dialed, []string{"postgres", "orders"}) {
+		t.Fatalf("dialed = %v", s.dialed)
+	}
+
+	// Existing groups not created by the plugin are never taken over.
+	s.executed = nil
+	s.dbs = []dbDatabase{{name: "billing", owner: "o", comment: managedComment}}
+	s.state = map[string]*roleState{"oe_billing_read": {}}
+	err := e.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: "billing", Owner: "o"})
+	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), `role "oe_billing_read" exists and isn't managed`) {
+		t.Fatalf("foreign group: err = %v", err)
+	}
+	if len(s.executed) != 0 {
+		t.Fatalf("executed = %q", s.executed)
+	}
+
 	if err := e.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: "appdb", Owner: "o"}); !errors.Is(err, engine.ErrInvalid) {
 		t.Fatalf("operator database: err = %v", err)
 	}
 
+	s.state, s.dbs = nil, nil
 	s.execErr = &pgconn.PgError{Message: `role "o" does not exist`}
-	err := e.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: "billing", Owner: "o"})
+	err = e.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: "payments", Owner: "o"})
 	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), `role "o" does not exist`) {
 		t.Fatalf("err = %v, want ErrInProgress with the reason", err)
 	}
@@ -106,13 +131,20 @@ func TestSyncDatabase(t *testing.T) {
 
 func TestReleaseDatabase(t *testing.T) {
 	ctx := context.Background()
-	s := &fakeSession{dbs: []dbDatabase{
-		{name: "orders", owner: "o", comment: managedComment},
-		{name: "foreign", owner: "o"},
-	}}
+	managedGroup := &roleState{comment: managedComment}
+	s := &fakeSession{
+		dbs: []dbDatabase{
+			{name: "orders", owner: "o", comment: managedComment},
+			{name: "foreign", owner: "o"},
+		},
+		state: map[string]*roleState{
+			"oe_orders_read": managedGroup, "oe_orders_readwrite": managedGroup,
+			"oe_foreign_read": managedGroup, "oe_gone_read": managedGroup, "oe_gone_readwrite": {},
+		},
+	}
 	e := newTestEngine(s, pgCluster(providerSpec(), "ready"))
 
-	for _, name := range []string{"missing", "foreign", "postgres"} {
+	for _, name := range []string{"foreign", "postgres"} {
 		if err := e.ReleaseDatabase(ctx, target, name, true); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -127,12 +159,21 @@ func TestReleaseDatabase(t *testing.T) {
 	if err := e.ReleaseDatabase(ctx, target, "orders", true); err != nil {
 		t.Fatal(err)
 	}
-	want := [][]string{{`COMMENT ON DATABASE "orders" IS NULL`}, {
-		`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = 'orders' AND state = 'idle' AND pid <> pg_catalog.pg_backend_pid()`,
-		`DROP DATABASE IF EXISTS "orders"`,
-	}}
+	// The database is already gone: its leftover managed groups are dropped.
+	if err := e.ReleaseDatabase(ctx, target, "gone", true); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{`COMMENT ON DATABASE "orders" IS NULL`},
+		{
+			`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = 'orders' AND state = 'idle' AND pid <> pg_catalog.pg_backend_pid()`,
+			`DROP DATABASE IF EXISTS "orders"`,
+		},
+		{`DROP ROLE IF EXISTS "oe_orders_read"`, `DROP ROLE IF EXISTS "oe_orders_readwrite"`},
+		{`DROP ROLE IF EXISTS "oe_gone_read"`},
+	}
 	if !reflect.DeepEqual(s.executed, want) {
-		t.Fatalf("executed = %v", s.executed)
+		t.Fatalf("executed =\n%q\nwant\n%q", s.executed, want)
 	}
 
 	s.execErr = &pgconn.PgError{Message: `database "orders" is being accessed by other users`, Detail: "There are 2 other sessions using the database."}

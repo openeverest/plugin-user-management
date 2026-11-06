@@ -60,6 +60,11 @@ type InstanceDatabaseStatus struct {
 	// an InstanceDatabase can't take over an existing database.
 	// +optional
 	Declared bool `json:"declared,omitempty"`
+	// Available is set once the database and the roles that grant access to
+	// it have been applied. Users can be granted roles on it from then on,
+	// even while it's Pending again, e.g. during an owner change.
+	// +optional
+	Available bool `json:"available,omitempty"`
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +optional

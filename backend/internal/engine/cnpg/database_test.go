@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -16,6 +18,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 func databaseObject(name string, labels map[string]any, spec, status map[string]any) *unstructured.Unstructured {
@@ -77,12 +80,25 @@ func TestListDatabases(t *testing.T) {
 	}
 }
 
+func ownerSecret(password string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "owner-credentials", Namespace: "ns"},
+		Data:       map[string][]byte{"password": []byte(password)},
+	}
+}
+
+var ordersOwned = engine.DesiredDatabase{
+	Name: "orders", Owner: "orders_owner",
+	OwnerPassword: engine.SecretKeyRef{Name: "owner-credentials", Key: "password"},
+}
+
 func TestSyncDatabaseDeclaresDatabase(t *testing.T) {
-	e := newTestEngine(&fakeSession{}, []runtime.Object{cnpgCluster(appBootstrap, true)})
-	if err := e.SyncDatabase(context.Background(), target, engine.DesiredDatabase{Name: "orders", Owner: "orders_owner"}); err != nil {
+	s := &fakeSession{objects: []pgaccess.Object{{Name: "public.sales"}}}
+	e := newTestEngine(s, []runtime.Object{cnpgCluster(appBootstrap, true)}, ownerSecret("owner-pw"))
+	if err := e.SyncDatabase(context.Background(), target, ordersOwned); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.applied) != 1 {
+	if len(e.applied) != 3 {
 		t.Fatalf("applied %d objects", len(e.applied))
 	}
 	obj := e.applied[0]
@@ -103,10 +119,47 @@ func TestSyncDatabaseDeclaresDatabase(t *testing.T) {
 		t.Fatalf("spec = %v", obj.Object["spec"])
 	}
 
+	// The group roles, without login, retained.
+	for i, group := range []string{"oe_orders_read", "oe_orders_readwrite"} {
+		role := e.applied[i+1]
+		wantSpec := map[string]any{
+			"cluster": map[string]any{"name": "pg"}, "name": group, "comment": "Managed by OpenEverest",
+			"login": false, "databaseRoleReclaimPolicy": "retain",
+		}
+		if role.GetKind() != "DatabaseRole" || role.GetName() != databaseRoleName("pg", group) || !reflect.DeepEqual(role.Object["spec"], wantSpec) {
+			t.Fatalf("group role = %s %s %v", role.GetKind(), role.GetName(), role.Object["spec"])
+		}
+	}
+
+	// Access is granted in the database, as its owner.
+	if !reflect.DeepEqual(s.dialedAs, []string{"orders/orders_owner/owner-pw"}) {
+		t.Fatalf("dialed as %v", s.dialedAs)
+	}
+	if want := [][]string{pgaccess.PrivilegeStatements("orders", "orders_owner", nil, s.objects)}; !reflect.DeepEqual(s.executed, want) {
+		t.Fatalf("executed = %q", s.executed)
+	}
+
 	for _, name := range []string{"app", "postgres"} {
 		if err := e.SyncDatabase(context.Background(), target, engine.DesiredDatabase{Name: name, Owner: "o"}); !errors.Is(err, engine.ErrInvalid) {
 			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
 		}
+	}
+}
+
+func TestSyncDatabaseWaitsToGrant(t *testing.T) {
+	// The owner's password isn't there yet.
+	e := newTestEngine(&fakeSession{}, []runtime.Object{cnpgCluster(appBootstrap, true)})
+	err := e.SyncDatabase(context.Background(), target, ordersOwned)
+	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), `password Secret "owner-credentials" is missing`) {
+		t.Fatalf("err = %v", err)
+	}
+
+	// CloudNativePG hasn't created a group role yet.
+	s := &fakeSession{execErr: &pgconn.PgError{Message: `role "oe_orders_read" does not exist`}}
+	e = newTestEngine(s, []runtime.Object{cnpgCluster(appBootstrap, true)}, ownerSecret("pw"))
+	err = e.SyncDatabase(context.Background(), target, ordersOwned)
+	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), `can't grant access to the database: role "oe_orders_read" does not exist`) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -122,8 +175,8 @@ func TestSyncDatabaseReportsOperatorError(t *testing.T) {
 
 	// A failure from an older generation isn't reported.
 	_ = unstructured.SetNestedField(failed.Object, int64(0), "status", "observedGeneration")
-	e = newTestEngine(&fakeSession{}, []runtime.Object{cnpgCluster(appBootstrap, true), failed})
-	if err := e.SyncDatabase(context.Background(), target, engine.DesiredDatabase{Name: "orders", Owner: "orders_owner"}); err != nil {
+	e = newTestEngine(&fakeSession{}, []runtime.Object{cnpgCluster(appBootstrap, true), failed}, ownerSecret("pw"))
+	if err := e.SyncDatabase(context.Background(), target, ordersOwned); err != nil {
 		t.Fatalf("stale status: err = %v", err)
 	}
 }
@@ -134,7 +187,13 @@ func TestReleaseDatabase(t *testing.T) {
 		obj := databaseObject(name, map[string]any{instanceLabel: "pg"}, map[string]any{
 			"cluster": map[string]any{"name": "pg"}, "name": "orders", "databaseReclaimPolicy": "retain",
 		}, map[string]any{"applied": true})
-		e := newTestEngine(&fakeSession{}, []runtime.Object{obj})
+		groups := []runtime.Object{}
+		for _, group := range []string{"oe_orders_read", "oe_orders_readwrite"} {
+			groups = append(groups, databaseRole(databaseRoleName("pg", group), map[string]any{instanceLabel: "pg"}, map[string]any{
+				"cluster": map[string]any{"name": "pg"}, "name": group, "databaseRoleReclaimPolicy": "retain",
+			}, map[string]any{"applied": true}))
+		}
+		e := newTestEngine(&fakeSession{}, append([]runtime.Object{obj}, groups...))
 
 		var policy string
 		fake := e.dyn.(*dynamicfake.FakeDynamicClient)
@@ -156,8 +215,65 @@ func TestReleaseDatabase(t *testing.T) {
 		if _, err := e.dyn.Resource(databaseResource).Namespace("ns").Get(context.Background(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 			t.Errorf("drop=%v: Database not deleted: %v", drop, err)
 		}
-		if err := e.ReleaseDatabase(context.Background(), target, "orders", drop); err != nil {
-			t.Fatalf("drop=%v: err = %v, want nil once the Database is gone", drop, err)
+		// Then each group role's DatabaseRole, with the same reclaim policy.
+		for _, group := range []string{"oe_orders_read", "oe_orders_readwrite"} {
+			if err := e.ReleaseDatabase(context.Background(), target, "orders", drop); !errors.Is(err, engine.ErrInProgress) {
+				t.Fatalf("drop=%v: err = %v, want ErrInProgress while releasing %s", drop, err, group)
+			}
+			role, err := e.dyn.Resource(databaseRoleResource).Namespace("ns").Get(context.Background(), databaseRoleName("pg", group), metav1.GetOptions{})
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("drop=%v: %s not deleted: %v %v", drop, group, role, err)
+			}
 		}
+		if err := e.ReleaseDatabase(context.Background(), target, "orders", drop); err != nil {
+			t.Fatalf("drop=%v: err = %v, want nil once everything is gone", drop, err)
+		}
+	}
+}
+
+func TestDatabaseRolesForUsers(t *testing.T) {
+	passwordSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "app-credentials", Namespace: "ns"}}
+	s := &fakeSession{
+		dbRoles: []dbRole{{name: "svc", memberOf: []string{"oe_orders_readwrite", "pg_monitor"}}, {name: "oe_orders_readwrite"}},
+		dbs:     []dbDatabase{{name: "orders"}, {name: "postgres"}},
+	}
+	e := newTestEngine(s, []runtime.Object{cnpgCluster(appBootstrap, true)}, passwordSecret)
+
+	roles, err := normalizeRoles([]engine.RoleGrant{{Role: "readWrite", Database: "orders"}, {Role: "pg_monitor"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.SyncUsers(context.Background(), target, []engine.DesiredUser{
+		{Username: "svc", Roles: roles, Password: engine.SecretKeyRef{Name: "app-credentials", Key: "password"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inRoles, _, _ := unstructured.NestedStringSlice(e.applied[0].Object, "spec", "inRoles")
+	if !reflect.DeepEqual(inRoles, []string{"oe_orders_readwrite", "pg_monitor"}) {
+		t.Fatalf("inRoles = %v", inRoles)
+	}
+
+	users, err := e.ListUsers(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range users {
+		switch u.Username {
+		case "svc":
+			if !engine.SameRoles(u.Roles, roles) || u.System {
+				t.Errorf("svc = %+v, want %+v", u, roles)
+			}
+		case "oe_orders_readwrite":
+			if !u.System {
+				t.Errorf("group role isn't a system user: %+v", u)
+			}
+		}
+	}
+
+	if err := validateUser(engine.DesiredUser{Username: "oe_orders_read"}); !errors.Is(err, engine.ErrInvalid) {
+		t.Errorf("group role name accepted as a username: %v", err)
+	}
+	if _, err := normalizeRoles([]engine.RoleGrant{{Role: "read"}}); !errors.Is(err, engine.ErrInvalid) {
+		t.Errorf("read without a database: %v", err)
 	}
 }

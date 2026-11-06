@@ -14,6 +14,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 const (
@@ -52,14 +54,24 @@ type dbDatabase struct {
 	template bool
 }
 
-// session reads the role and database catalogs of a cluster.
+// session reads the role and database catalogs of a cluster and, as a
+// database's owner, grants access to it.
 type session interface {
 	roles(ctx context.Context) ([]dbRole, error)
 	databases(ctx context.Context) ([]dbDatabase, error)
+	// grantTargets runs pgaccess.SchemasQuery and pgaccess.ObjectsQuery for
+	// the groups in the session's database.
+	grantTargets(ctx context.Context, read, readWrite string) ([]string, []pgaccess.Object, error)
+	// exec runs the statements in one transaction.
+	exec(ctx context.Context, stmts []string) error
 	close(ctx context.Context)
 }
 
+// dialer connects to the application database to read the catalogs.
 type dialer func(ctx context.Context, c cluster) (session, error)
+
+// userDialer connects to a database as the given user.
+type userDialer func(ctx context.Context, c cluster, database, user, password string) (session, error)
 
 type pgxSession struct {
 	conn *pgx.Conn
@@ -74,35 +86,48 @@ func pgxDialer(kube kubernetes.Interface) dialer {
 		if err != nil {
 			return nil, err
 		}
-		dsn := url.URL{
-			Scheme:   "postgres",
-			User:     url.UserPassword(user, password),
-			Host:     net.JoinHostPort(c.host, postgresPort),
-			Path:     "/" + c.database,
-			RawQuery: url.Values{"sslmode": {"require"}}.Encode(),
-		}
-		cfg, err := pgx.ParseConfig(dsn.String())
-		if err != nil {
-			return nil, fmt.Errorf("postgres connection config: %w", err)
-		}
-		cfg.ConnectTimeout = connectTimeout
-		cfg.RuntimeParams["application_name"] = applicationName
-		ca, err := kube.CoreV1().Secrets(c.namespace).Get(ctx, c.caSecret, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("get CA secret %q: %w", c.caSecret, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(ca.Data[caCertKey]) {
-			return nil, fmt.Errorf("CA secret %q has no valid %s", c.caSecret, caCertKey)
-		}
-		cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: c.host}
-		cfg.Fallbacks = nil
-		conn, err := pgx.ConnectConfig(ctx, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
-		}
-		return &pgxSession{conn: conn}, nil
+		return pgxConnect(ctx, kube, c, c.database, user, password)
 	}
+}
+
+// pgxUserDialer connects as a user the plugin has the password of, such as
+// the owner of a database.
+func pgxUserDialer(kube kubernetes.Interface) userDialer {
+	return func(ctx context.Context, c cluster, database, user, password string) (session, error) {
+		return pgxConnect(ctx, kube, c, database, user, password)
+	}
+}
+
+// pgxConnect connects to the primary over TLS verified against the cluster's CA.
+func pgxConnect(ctx context.Context, kube kubernetes.Interface, c cluster, database, user, password string) (session, error) {
+	dsn := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     net.JoinHostPort(c.host, postgresPort),
+		Path:     "/" + database,
+		RawQuery: url.Values{"sslmode": {"require"}}.Encode(),
+	}
+	cfg, err := pgx.ParseConfig(dsn.String())
+	if err != nil {
+		return nil, fmt.Errorf("postgres connection config: %w", err)
+	}
+	cfg.ConnectTimeout = connectTimeout
+	cfg.RuntimeParams["application_name"] = applicationName
+	ca, err := kube.CoreV1().Secrets(c.namespace).Get(ctx, c.caSecret, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get CA secret %q: %w", c.caSecret, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca.Data[caCertKey]) {
+		return nil, fmt.Errorf("CA secret %q has no valid %s", c.caSecret, caCertKey)
+	}
+	cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: c.host}
+	cfg.Fallbacks = nil
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
+	}
+	return &pgxSession{conn: conn}, nil
 }
 
 func loginCredentials(ctx context.Context, kube kubernetes.Interface, c cluster) (string, string, error) {
@@ -160,6 +185,41 @@ func (s *pgxSession) databases(ctx context.Context) ([]dbDatabase, error) {
 		return nil, fmt.Errorf("list databases: %w", err)
 	}
 	return dbs, nil
+}
+
+func (s *pgxSession) grantTargets(ctx context.Context, read, readWrite string) ([]string, []pgaccess.Object, error) {
+	rows, err := s.conn.Query(ctx, pgaccess.SchemasQuery, read, readWrite)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list schemas: %w", err)
+	}
+	schemas, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, nil, fmt.Errorf("list schemas: %w", err)
+	}
+	rows, err = s.conn.Query(ctx, pgaccess.ObjectsQuery, read, readWrite)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list objects: %w", err)
+	}
+	objects, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (pgaccess.Object, error) {
+		var o pgaccess.Object
+		err := row.Scan(&o.Name, &o.Sequence)
+		return o, err
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("list objects: %w", err)
+	}
+	return schemas, objects, nil
+}
+
+func (s *pgxSession) exec(ctx context.Context, stmts []string) error {
+	return pgx.BeginFunc(ctx, s.conn, func(tx pgx.Tx) error {
+		for _, stmt := range stmts {
+			if _, err := tx.Exec(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *pgxSession) close(ctx context.Context) {

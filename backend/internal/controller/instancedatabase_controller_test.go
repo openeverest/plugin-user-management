@@ -55,10 +55,12 @@ func (f *fakeDatabaseEngine) ReleaseDatabase(_ context.Context, _ engine.Target,
 	return f.releaseErr
 }
 
+// owner is an InstanceUser; one that isn't Pending has been declared.
 func owner(name, username, instanceName, phase string) *v1alpha1.InstanceUser {
 	u := dbUser(name, username)
 	u.Spec.InstanceRef.Name = instanceName
 	u.Status.Phase = phase
+	u.Status.Declared = phase != v1alpha1.PhasePending
 	return u
 }
 
@@ -149,7 +151,7 @@ func TestDatabaseLifecycle(t *testing.T) {
 		len(db.OwnerReferences) != 1 || db.OwnerReferences[0].UID != "instance-uid" {
 		t.Fatalf("metadata = %+v", db.ObjectMeta)
 	}
-	if want := []engine.DesiredDatabase{{Name: "orders", Owner: "orders_owner"}}; !reflect.DeepEqual(h.engine.syncedDBs, want) {
+	if want := []engine.DesiredDatabase{{Name: "orders", Owner: "orders_owner", OwnerPassword: engine.SecretKeyRef{Name: "orders-owner-credentials", Key: "password"}}}; !reflect.DeepEqual(h.engine.syncedDBs, want) {
 		t.Fatalf("synced = %+v", h.engine.syncedDBs)
 	}
 
@@ -191,7 +193,7 @@ func TestDatabaseWaitsForOwner(t *testing.T) {
 
 	h.reconcile()
 	h.expectPhase("missing-owner", v1alpha1.PhasePending, `owner InstanceUser "nobody" not found`)
-	h.expectPhase("pending-owner", v1alpha1.PhasePending, `waiting for owner InstanceUser "not-ready" to be Ready`)
+	h.expectPhase("pending-owner", v1alpha1.PhasePending, `waiting for owner InstanceUser "not-ready" to be created`)
 	h.expectPhase("foreign-owner", v1alpha1.PhaseFailed, `belongs to instance "other-instance"`)
 	if len(h.engine.syncedDBs) != 0 {
 		t.Fatalf("synced without a ready owner: %+v", h.engine.syncedDBs)
@@ -220,7 +222,7 @@ func TestDatabaseNoTakeover(t *testing.T) {
 	h.expectPhase("reserved", v1alpha1.PhaseFailed, `database "postgres" is reserved`)
 	h.expectPhase("first", v1alpha1.PhasePending, "")
 	h.expectPhase("second", v1alpha1.PhaseFailed, `another InstanceDatabase already declares database "dup"`)
-	if want := []engine.DesiredDatabase{{Name: "dup", Owner: "o"}}; !reflect.DeepEqual(h.engine.syncedDBs, want) {
+	if want := []engine.DesiredDatabase{{Name: "dup", Owner: "o", OwnerPassword: engine.SecretKeyRef{Name: "o-credentials", Key: "password"}}}; !reflect.DeepEqual(h.engine.syncedDBs, want) {
 		t.Fatalf("synced = %+v", h.engine.syncedDBs)
 	}
 
@@ -334,7 +336,91 @@ func TestDatabaseDeletionWithSameNameRecreated(t *testing.T) {
 	if db := h.expectPhase("new", v1alpha1.PhasePending, "waiting for the database"); !db.Status.Declared {
 		t.Fatal("name not claimed")
 	}
-	if want := []engine.DesiredDatabase{{Name: "orders", Owner: "o"}}; !reflect.DeepEqual(h.engine.syncedDBs, want) {
+	if want := []engine.DesiredDatabase{{Name: "orders", Owner: "o", OwnerPassword: engine.SecretKeyRef{Name: "o-credentials", Key: "password"}}}; !reflect.DeepEqual(h.engine.syncedDBs, want) {
 		t.Fatalf("synced = %+v", h.engine.syncedDBs)
+	}
+}
+
+// Users granted a role on a database wait for its InstanceDatabase, on
+// engines that manage databases.
+func TestUserWaitsForDatabase(t *testing.T) {
+	inst := instance("provider-cloudnative-pg")
+	db := instanceDatabase("orders", "orders", "o")
+	reader := dbUser("reader", "reader", v1alpha1.RoleGrant{Role: "read", Database: "orders"})
+	monitor := dbUser("monitor", "monitor", v1alpha1.RoleGrant{Role: "pg_monitor"})
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithObjects(inst, db, reader, monitor).
+		WithStatusSubresource(&v1alpha1.InstanceUser{}, &v1alpha1.InstanceDatabase{}).
+		WithIndex(&v1alpha1.InstanceUser{}, InstanceIndex, func(obj client.Object) []string {
+			return []string{obj.(*v1alpha1.InstanceUser).Spec.InstanceRef.Name}
+		}).
+		WithIndex(&v1alpha1.InstanceDatabase{}, InstanceIndex, func(obj client.Object) []string {
+			return []string{obj.(*v1alpha1.InstanceDatabase).Spec.InstanceRef.Name}
+		}).
+		Build()
+	eng := &fakeDatabaseEngine{}
+	h := &harness{t: t, client: c, r: &Reconciler{Client: c, Engines: map[string]engine.Engine{"provider-cloudnative-pg": eng}}}
+
+	h.reconcile()
+	if u := h.get("reader"); u.Status.Phase != v1alpha1.PhasePending || !strings.Contains(u.Status.Message, `waiting for the InstanceDatabase of database "orders"`) {
+		t.Fatalf("reader = %s %q", u.Status.Phase, u.Status.Message)
+	}
+	h.secret("reader-credentials")
+	// Declared right away without the waiting grant, so revocations apply.
+	if len(eng.synced) != 1 || len(eng.synced[0]) != 2 {
+		t.Fatalf("synced = %+v", eng.synced)
+	}
+	for _, u := range eng.synced[0] {
+		if u.Username == "reader" && len(u.Roles) != 0 {
+			t.Fatalf("reader declared with %+v", u.Roles)
+		}
+	}
+
+	db = &v1alpha1.InstanceDatabase{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "orders"}, db); err != nil {
+		t.Fatal(err)
+	}
+	// Available once applied, even if Pending again later.
+	db.Status.Phase, db.Status.Available = v1alpha1.PhasePending, true
+	if err := c.Status().Update(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile()
+	declaredRead := false
+	for _, u := range eng.synced[len(eng.synced)-1] {
+		declaredRead = declaredRead || u.Username == "reader" && len(u.Roles) == 1 && u.Roles[0].Database == "orders"
+	}
+	if !declaredRead {
+		t.Fatalf("reader not granted read once the database is Ready: %+v", eng.synced)
+	}
+}
+
+func TestDatabaseAvailableIsSticky(t *testing.T) {
+	h := newDBHarness(t, instance("provider-cloudnative-pg"),
+		owner("o", "o", "mongo", v1alpha1.PhaseReady),
+		instanceDatabase("orders", "orders", "o"))
+	h.reconcile()
+	if !h.get("orders").Status.Available {
+		t.Fatal("not available once applied")
+	}
+	// A later failure keeps it available, so users keep their access.
+	h.engine.syncDBErr = errors.Join(engine.ErrInProgress, errors.New("lock timeout"))
+	h.reconcile()
+	if db := h.expectPhase("orders", v1alpha1.PhasePending, "lock timeout"); !db.Status.Available {
+		t.Fatal("available reset by a transient error")
+	}
+}
+
+// An owner granted a role on its own database must not deadlock: the
+// database only waits for the owner to be declared, not Ready.
+func TestDatabaseOwnerOnlyNeedsToBeDeclared(t *testing.T) {
+	o := owner("o", "o", "mongo", v1alpha1.PhasePending)
+	o.Status.Declared = true
+	o.Status.Message = `waiting for the InstanceDatabase of database "orders"`
+	h := newDBHarness(t, instance("provider-cloudnative-pg"), o, instanceDatabase("orders", "orders", "o"))
+	h.reconcile()
+	if len(h.engine.syncedDBs) != 1 {
+		t.Fatalf("database not declared while its owner waits for it: %+v", h.get("orders").Status)
 	}
 }

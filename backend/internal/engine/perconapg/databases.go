@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 var _ engine.DatabaseEngine = (*Engine)(nil)
@@ -48,9 +49,10 @@ func (e *Engine) ListDatabases(ctx context.Context, target engine.Target) ([]eng
 }
 
 // SyncDatabase implements engine.DatabaseEngine: it creates the database
-// with its owner, marked as managed, or changes the owner. The controller
-// only declares a database it claimed before it existed, so an existing
-// database without the mark is one whose creation was interrupted.
+// with its owner, marked as managed, or changes the owner, then keeps its
+// group roles and their access current. The controller only declares a
+// database it claimed before it existed, so an existing database without the
+// mark is one whose creation was interrupted.
 func (e *Engine) SyncDatabase(ctx context.Context, target engine.Target, want engine.DesiredDatabase) error {
 	if err := e.ValidateDatabase(want.Name); err != nil {
 		return err
@@ -67,17 +69,67 @@ func (e *Engine) SyncDatabase(ctx context.Context, target engine.Target, want en
 	if err != nil {
 		return err
 	}
-	stmts := planDatabase(want, current)
-	if len(stmts) == 0 {
-		return nil
-	}
-	if err := s.execEach(ctx, stmts); err != nil {
-		if reason := postgresReason(err); reason != "" {
-			return fmt.Errorf("%w: PostgreSQL can't apply the database: %s", engine.ErrInProgress, reason)
+	if stmts := planDatabase(want, current); len(stmts) > 0 {
+		if err := s.execEach(ctx, stmts); err != nil {
+			return inProgress(err, "PostgreSQL can't apply the database")
 		}
+	}
+	if err := ensureGroups(ctx, s, want.Name); err != nil {
 		return err
 	}
+	return e.grantAccess(ctx, c, want)
+}
+
+// ensureGroups creates the database's group roles, marked as managed.
+func ensureGroups(ctx context.Context, s session, database string) error {
+	for _, access := range pgaccess.AccessRoles {
+		name := pgaccess.GroupRole(database, access)
+		current, err := s.role(ctx, name)
+		if err != nil {
+			return err
+		}
+		if current != nil {
+			if !current.managed() {
+				return fmt.Errorf("%w: role %q exists and isn't managed by OpenEverest", engine.ErrInProgress, name)
+			}
+			continue
+		}
+		stmts := []string{
+			"CREATE ROLE " + quoteIdent(name) + " WITH NOLOGIN",
+			fmt.Sprintf("COMMENT ON ROLE %s IS %s", quoteIdent(name), quoteLiteral(managedComment)),
+		}
+		if err := s.exec(ctx, stmts); err != nil {
+			return inProgress(err, "PostgreSQL can't create the database's roles")
+		}
+	}
 	return nil
+}
+
+// grantAccess gives the group roles their access, in the database, as the superuser.
+func (e *Engine) grantAccess(ctx context.Context, c cluster, want engine.DesiredDatabase) error {
+	s, err := e.dial(ctx, c, want.Name)
+	if err != nil {
+		return err
+	}
+	defer s.close(ctx)
+	read, readWrite := pgaccess.GroupRole(want.Name, pgaccess.RoleRead), pgaccess.GroupRole(want.Name, pgaccess.RoleReadWrite)
+	schemas, objects, err := s.grantTargets(ctx, read, readWrite)
+	if err != nil {
+		return inProgress(err, "PostgreSQL can't list the database's objects")
+	}
+	if err := s.exec(ctx, pgaccess.PrivilegeStatements(want.Name, want.Owner, schemas, objects)); err != nil {
+		return inProgress(err, "PostgreSQL can't grant access to the database")
+	}
+	return nil
+}
+
+// inProgress reports a server error as ErrInProgress with what failed;
+// other errors are returned as they are, to be retried.
+func inProgress(err error, what string) error {
+	if reason := pgaccess.ServerReason(err); reason != "" {
+		return fmt.Errorf("%w: %s: %s", engine.ErrInProgress, what, reason)
+	}
+	return err
 }
 
 // planDatabase returns the statements that make the database match: it
@@ -116,24 +168,45 @@ func (e *Engine) ReleaseDatabase(ctx context.Context, target engine.Target, name
 		return nil
 	}
 	current, err := findDatabase(ctx, s, name)
-	if err != nil || current == nil || !current.managed() {
+	if err != nil {
 		return err
 	}
-	stmts := []string{fmt.Sprintf("COMMENT ON DATABASE %s IS NULL", quoteIdent(name))}
-	if drop {
-		stmts = []string{
-			fmt.Sprintf("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "+
-				"WHERE datname = %s AND state = 'idle' AND pid <> pg_catalog.pg_backend_pid()", quoteLiteral(name)),
-			"DROP DATABASE IF EXISTS " + quoteIdent(name),
+	if current != nil {
+		if !current.managed() {
+			return nil
+		}
+		stmts := []string{fmt.Sprintf("COMMENT ON DATABASE %s IS NULL", quoteIdent(name))}
+		if drop {
+			stmts = []string{
+				fmt.Sprintf("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "+
+					"WHERE datname = %s AND state = 'idle' AND pid <> pg_catalog.pg_backend_pid()", quoteLiteral(name)),
+				"DROP DATABASE IF EXISTS " + quoteIdent(name),
+			}
+		}
+		if err := s.execEach(ctx, stmts); err != nil {
+			return inProgress(err, "PostgreSQL can't drop the database")
 		}
 	}
-	if err := s.execEach(ctx, stmts); err != nil {
-		if reason := postgresReason(err); reason != "" {
-			return fmt.Errorf("%w: PostgreSQL can't drop the database: %s", engine.ErrInProgress, reason)
-		}
-		return err
+	if !drop {
+		return nil
 	}
-	return nil
+	// The group roles go with the database, also when a previous attempt
+	// dropped the database but not them; memberships go with the roles.
+	var drops []string
+	for _, access := range pgaccess.AccessRoles {
+		group := pgaccess.GroupRole(name, access)
+		state, err := s.role(ctx, group)
+		if err != nil {
+			return err
+		}
+		if state != nil && state.managed() {
+			drops = append(drops, "DROP ROLE IF EXISTS "+quoteIdent(group))
+		}
+	}
+	if len(drops) == 0 {
+		return nil
+	}
+	return inProgress(s.exec(ctx, drops), "PostgreSQL can't drop the database's roles")
 }
 
 func findDatabase(ctx context.Context, s session, name string) (*dbDatabase, error) {
