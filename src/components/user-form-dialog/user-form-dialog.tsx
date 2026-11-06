@@ -33,6 +33,10 @@ interface UserFormDialogProps {
   initialRoles?: RoleGrant[];
   isSubmitting: boolean;
   error?: string;
+  // False when users may have no roles.
+  rolesRequired?: boolean;
+  // The databases database-scoped roles can be granted on, when managed.
+  databases?: string[];
   onSubmit: (user: NewUser) => void;
   onClose: () => void;
 }
@@ -44,13 +48,15 @@ export const UserFormDialog = ({
   initialRoles,
   isSubmitting,
   error,
+  rolesRequired = true,
+  databases,
   onSubmit,
   onClose,
 }: UserFormDialogProps) => {
   const [values, setValues] = useState(() => initialFormValues(initialRoles, roles));
   const [submitted, setSubmitted] = useState(false);
   const terms = useTerms();
-  const errors = validateUserForm(values, roles, mode);
+  const errors = validateUserForm(values, roles, mode, rolesRequired);
   const isCreate = mode === 'create';
 
   const setRoleRow = (index: number, row: RoleGrantDraft) =>
@@ -108,14 +114,20 @@ export const UserFormDialog = ({
                 roles={roles}
                 errors={errors.roleRows[index]}
                 showErrors={submitted}
-                canRemove={values.roles.length > 1}
+                canRemove={values.roles.length > 1 || !rolesRequired}
                 showDatabase={hasDatabaseRoles(roles)}
+                databases={databases}
                 onChange={(next) => setRoleRow(index, next)}
                 onRemove={() =>
                   setValues((v) => ({ ...v, roles: v.roles.filter((_, i) => i !== index) }))
                 }
               />
             ))}
+            {values.roles.length === 0 && (
+              <Typography variant="body2" color="text.secondary">
+                {Messages.noRoles}
+              </Typography>
+            )}
             {canAddRoleRow(values.roles, roles) && (
               <Button
                 startIcon={<AddIcon />}

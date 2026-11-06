@@ -41,6 +41,10 @@ type User struct {
 	Roles    []RoleGrant `json:"roles"`
 	// System users are created and used by the operator.
 	System bool `json:"system"`
+	// Hidden users are roles the plugin creates for its own use, such as
+	// per-database group roles; they're listed so they're never declared,
+	// but not shown.
+	Hidden bool `json:"-"`
 }
 
 // SecretKeyRef points to a key of a Secret in the instance's namespace.

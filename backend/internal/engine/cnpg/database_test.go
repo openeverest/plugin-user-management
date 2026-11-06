@@ -264,7 +264,7 @@ func TestDatabaseRolesForUsers(t *testing.T) {
 				t.Errorf("svc = %+v, want %+v", u, roles)
 			}
 		case "oe_orders_readwrite":
-			if !u.System {
+			if !u.System || !u.Hidden {
 				t.Errorf("group role isn't a system user: %+v", u)
 			}
 		}

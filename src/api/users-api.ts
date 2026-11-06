@@ -1,31 +1,8 @@
-import type { PluginApi } from '@openeverest/plugin-sdk';
 import { Credentials, InstanceTarget, NewUser, RoleGrant, UsersResponse } from 'types/users.types';
-
-type PluginFetch = PluginApi['fetch'];
-
-const instanceParams = ({ namespace, instanceName }: InstanceTarget) =>
-  new URLSearchParams({ namespace, instance: instanceName });
+import { instanceParams, PluginFetch, request } from './plugin-request';
 
 const userPath = (id: string, target: InstanceTarget, suffix = '') =>
   `/api/users/${encodeURIComponent(id)}${suffix}?${instanceParams(target)}`;
-
-const errorFromResponse = async (response: Response) => {
-  const body = await response.json().catch(() => null);
-  const message =
-    body && typeof body.error === 'string' ? body.error : `HTTP ${response.status}`;
-  return new Error(message);
-};
-
-const request = async (pluginFetch: PluginFetch, path: string, init?: RequestInit) => {
-  const response = await pluginFetch(path, {
-    ...init,
-    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
-  });
-  if (!response.ok) {
-    throw await errorFromResponse(response);
-  }
-  return response;
-};
 
 export const getUsers = async (
   pluginFetch: PluginFetch,

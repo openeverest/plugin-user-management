@@ -121,3 +121,69 @@ describe('UserFormDialog', () => {
     expect(screen.getByLabelText(Messages.database)).toBeTruthy();
   });
 });
+
+describe('UserFormDialog with managed databases', () => {
+  afterEach(cleanup);
+
+  it('picks the database of a database-scoped role from the managed ones', () => {
+    const onSubmit = vi.fn();
+    render(
+      <UserFormDialog
+        mode="create"
+        roles={roles}
+        databases={['orders', 'billing']}
+        rolesRequired={false}
+        isSubmitting={false}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.change(screen.getByLabelText(PASSWORD_TERMS.username), { target: { value: 'app' } });
+    selectRole(0, 'readWrite');
+    fireEvent.mouseDown(screen.getAllByRole('combobox')[1]);
+    const options = within(screen.getByRole('listbox')).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toEqual(['orders', 'billing']);
+    fireEvent.click(within(screen.getByRole('listbox')).getByText('billing'));
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      username: 'app',
+      password: undefined,
+      roles: [{ role: 'readWrite', database: 'billing' }],
+    });
+  });
+
+  it('says to create a database first when there is none', () => {
+    render(
+      <UserFormDialog mode="create" roles={roles} databases={[]} isSubmitting={false} onSubmit={vi.fn()} onClose={vi.fn()} />
+    );
+    selectRole(0, 'readWrite');
+    expect(screen.getByText(Messages.noDatabases)).toBeTruthy();
+  });
+
+  it('creates a user without roles when the engine allows it', () => {
+    const onSubmit = vi.fn();
+    render(
+      <UserFormDialog
+        mode="create"
+        roles={roles}
+        databases={[]}
+        rolesRequired={false}
+        isSubmitting={false}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.change(screen.getByLabelText(PASSWORD_TERMS.username), { target: { value: 'orders_owner' } });
+    fireEvent.click(screen.getByRole('button', { name: Messages.removeRole }));
+    expect(screen.getByText(Messages.noRoles)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+    expect(onSubmit).toHaveBeenCalledWith({ username: 'orders_owner', password: undefined, roles: [] });
+  });
+
+  it('still requires a role when the engine does', () => {
+    render(
+      <UserFormDialog mode="create" roles={roles} isSubmitting={false} onSubmit={vi.fn()} onClose={vi.fn()} />
+    );
+    expect((screen.getByRole('button', { name: Messages.removeRole }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});

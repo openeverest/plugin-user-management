@@ -101,6 +101,10 @@ func newMux(s *server) *http.ServeMux {
 	mux.HandleFunc("GET /api/users/{id}/credentials", s.handleGetCredentials)
 	mux.HandleFunc("POST /api/users/{id}/password", s.handleResetPassword)
 	mux.HandleFunc("DELETE /api/users/{id}", s.handleDeleteUser)
+	mux.HandleFunc("GET /api/databases", s.handleListDatabases)
+	mux.HandleFunc("POST /api/databases", s.handleCreateDatabase)
+	mux.HandleFunc("PUT /api/databases/{id}", s.handleUpdateDatabase)
+	mux.HandleFunc("DELETE /api/databases/{id}", s.handleDeleteDatabase)
 	return mux
 }
 

@@ -36,6 +36,10 @@ export interface UsersResponse {
   canManage: boolean;
   databaseError?: string;
   credentialKind?: CredentialKind;
+  // False when users may have no roles, e.g. a PostgreSQL database's owner.
+  rolesRequired?: boolean;
+  // True when database-scoped roles are granted on the instance's managed databases.
+  databasesSupported?: boolean;
 }
 
 export interface Credentials {

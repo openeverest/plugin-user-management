@@ -12,7 +12,7 @@ instance page or with `kubectl`/GitOps; either way the plugin keeps the
 database in sync, stores generated credentials in a Secret applications can
 mount, and drops the user when the resource is deleted. On PostgreSQL, the
 databases of an instance and their owners are declared the same way, as
-`InstanceDatabase`s (kubectl/GitOps for now).
+`InstanceDatabase`s, from the **Databases** tab or with `kubectl`/GitOps.
 
 Supported providers:
 
@@ -73,6 +73,13 @@ See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
 ## InstanceDatabase
 
 Supported for `provider-cloudnative-pg` and `provider-percona-postgresql`.
+Manage them from the instance's **Databases** tab, which lists the managed
+databases with their owner, who can connect and status, next to the
+instance's other databases. There you create a database for an owner (a user
+of the instance; it needs no roles), change its owner or who can connect, and
+delete it, keeping its data or, after typing its name, dropping it. In the
+**Users** tab, `read` and `readWrite` are granted on one of these databases,
+picked from a list.
 
 ```yaml
 apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
@@ -472,6 +479,7 @@ done
 | Value | Default | Description |
 |---|---|---|
 | `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Users tab |
+| `plugin.extensionPoints[1].providers` | `[provider-cloudnative-pg, provider-percona-postgresql]` | Providers that get the Databases tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
 The chart's ClusterRole lets the backend manage InstanceUsers,
@@ -492,22 +500,34 @@ InstanceUsers, not DatabaseRoles.
 
 Served under `/v1/clusters/{cluster}/plugins/plugin-user-management` by
 everest-server. Every endpoint takes `?namespace=&instance=`; `{id}` is the
-InstanceUser's name.
+InstanceUser's, or InstanceDatabase's, name. Databases take the same
+permissions as users.
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind}` |
+| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind, rolesRequired, databasesSupported}` |
 | `POST /api/users` | `{username, password?, roles}` | `201` credentials |
 | `PUT /api/users/{id}/roles` | `{roles}` | `204`; the roles replace the user's roles |
 | `GET /api/users/{id}/credentials` | | credentials |
 | `POST /api/users/{id}/password` | `{password?}` | credentials |
 | `DELETE /api/users/{id}` | | `204` |
+| `GET /api/databases` | | `{databases, supported, canManage, databaseError?}` |
+| `POST /api/databases` | `{name, ownerId, connect?}` | `201` database |
+| `PUT /api/databases/{id}` | `{ownerId, connect?}` | `204` |
+| `DELETE /api/databases/{id}` | | `204`; with `&drop=true` the database is dropped, otherwise kept |
 
 Credentials are `{id, username, password, uri?, secret, properties?}`;
 `properties` holds further connection details such as `model`. `roles` are
 `[{role, database?}]`; `database` is only set for database-scoped roles. An
 empty `password` is generated (24 letters and digits). When `credentialKind`
 is `apiKey`, the password must be empty and an `oe_sk_` API key is generated.
+`rolesRequired` is false when users may have no roles (PostgreSQL), and
+`databasesSupported` true when database-scoped roles are granted on the
+instance's managed databases. Databases are `{id?, name, owner?, ownerId?,
+connect?, deletionPolicy?, managed, system, phase?, message?}`; `ownerId` is
+the owner's InstanceUser and `connect` is `Public` or `Granted`. Databases
+the plugin doesn't manage are listed without `id`, and the plugin's own
+per-database group roles aren't listed as users.
 
 ## Development
 
@@ -559,8 +579,7 @@ GitHub release with notes.
 
 - An engine for MySQL (`percona-xtradb-cluster`), through its operator's
   user API.
-- A Databases tab and API for InstanceDatabases, and InstanceDatabases for
-  other engines.
+- InstanceDatabases for other engines.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.
 - Adopting existing database users into an InstanceUser.
 - Configurable role catalog per installation.

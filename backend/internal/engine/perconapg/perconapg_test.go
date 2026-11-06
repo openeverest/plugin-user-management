@@ -536,7 +536,7 @@ func TestListUsersDatabaseRoles(t *testing.T) {
 	want := []engine.User{
 		// A group of a database that no longer exists isn't a grant on it.
 		{Username: "app", Roles: []engine.RoleGrant{{Role: "read", Database: "orders"}, {Role: "pg_monitor"}, {Role: "oe_gone_read"}}},
-		{Username: "oe_orders_read", Roles: []engine.RoleGrant{}, System: true},
+		{Username: "oe_orders_read", Roles: []engine.RoleGrant{}, System: true, Hidden: true},
 		{Username: "postgres", Roles: []engine.RoleGrant{}, System: true},
 	}
 	if !reflect.DeepEqual(users, want) {

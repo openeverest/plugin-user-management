@@ -129,6 +129,7 @@ func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.
 			Username: r.name,
 			Roles:    pgaccess.Grants(r.memberOf, databases),
 			System:   c.isSystemRole(r.name) || pgaccess.IsGroupRole(r.name),
+			Hidden:   pgaccess.IsGroupRole(r.name),
 		})
 		listed[r.name] = true
 	}

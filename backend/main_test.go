@@ -96,10 +96,11 @@ func fakeEverest(t *testing.T, provider string, instanceStatus, connectionStatus
 }
 
 type testEnv struct {
-	t      *testing.T
-	kube   client.Client
-	engine *fakeEngine
-	h      http.Handler
+	t        *testing.T
+	kube     client.Client
+	engine   *fakeEngine
+	dbEngine *fakeDBEngine
+	h        http.Handler
 }
 
 func newTestEnv(t *testing.T, provider string, instanceStatus, connectionStatus int, objs ...client.Object) *testEnv {
@@ -114,8 +115,12 @@ func newTestEnv(t *testing.T, provider string, instanceStatus, connectionStatus 
 		WithIndex(&v1alpha1.InstanceUser{}, controller.InstanceIndex, func(obj client.Object) []string {
 			return []string{obj.(*v1alpha1.InstanceUser).Spec.InstanceRef.Name}
 		}).
+		WithIndex(&v1alpha1.InstanceDatabase{}, controller.InstanceIndex, func(obj client.Object) []string {
+			return []string{obj.(*v1alpha1.InstanceDatabase).Spec.InstanceRef.Name}
+		}).
 		Build()
 	eng := &fakeEngine{}
+	dbEng := &fakeDBEngine{fakeEngine: eng}
 	var registered engine.Engine = eng
 	if provider == keyProvider {
 		registered = &fakeKeyEngine{eng}
@@ -123,9 +128,9 @@ func newTestEnv(t *testing.T, provider string, instanceStatus, connectionStatus 
 	s := &server{
 		everest: newEverestClient(fakeEverest(t, provider, instanceStatus, connectionStatus).URL),
 		kube:    kube,
-		engines: map[string]engine.Engine{"percona-server-mongodb": eng, keyProvider: registered},
+		engines: map[string]engine.Engine{"percona-server-mongodb": eng, keyProvider: registered, dbProvider: dbEng},
 	}
-	return &testEnv{t: t, kube: kube, engine: eng, h: newMux(s)}
+	return &testEnv{t: t, kube: kube, engine: eng, dbEngine: dbEng, h: newMux(s)}
 }
 
 const keyProvider = "provider-kserve"
