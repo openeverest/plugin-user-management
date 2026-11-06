@@ -424,3 +424,13 @@ func TestDatabaseOwnerOnlyNeedsToBeDeclared(t *testing.T) {
 		t.Fatalf("database not declared while its owner waits for it: %+v", h.get("orders").Status)
 	}
 }
+
+func TestDatabaseRestrictConnectPassed(t *testing.T) {
+	db := instanceDatabase("orders", "orders", "o")
+	db.Spec.Connect = v1alpha1.ConnectGranted
+	h := newDBHarness(t, instance("provider-cloudnative-pg"), owner("o", "o", "mongo", v1alpha1.PhaseReady), db)
+	h.reconcile()
+	if len(h.engine.syncedDBs) != 1 || !h.engine.syncedDBs[0].RestrictConnect {
+		t.Fatalf("synced = %+v", h.engine.syncedDBs)
+	}
+}

@@ -135,7 +135,7 @@ func TestSyncDatabaseDeclaresDatabase(t *testing.T) {
 	if !reflect.DeepEqual(s.dialedAs, []string{"orders/orders_owner/owner-pw"}) {
 		t.Fatalf("dialed as %v", s.dialedAs)
 	}
-	if want := [][]string{pgaccess.PrivilegeStatements("orders", "orders_owner", nil, s.objects)}; !reflect.DeepEqual(s.executed, want) {
+	if want := [][]string{pgaccess.PrivilegeStatements("orders", "orders_owner", nil, s.objects, pgaccess.Connect{})}; !reflect.DeepEqual(s.executed, want) {
 		t.Fatalf("executed = %q", s.executed)
 	}
 
@@ -275,5 +275,19 @@ func TestDatabaseRolesForUsers(t *testing.T) {
 	}
 	if _, err := normalizeRoles([]engine.RoleGrant{{Role: "read"}}); !errors.Is(err, engine.ErrInvalid) {
 		t.Errorf("read without a database: %v", err)
+	}
+}
+
+func TestSyncDatabaseRestrictConnect(t *testing.T) {
+	s := &fakeSession{existing: []string{"cnpg_metrics_exporter"}}
+	e := newTestEngine(s, []runtime.Object{cnpgCluster(appBootstrap, true)}, ownerSecret("pw"))
+	want := ordersOwned
+	want.RestrictConnect = true
+	if err := e.SyncDatabase(context.Background(), target, want); err != nil {
+		t.Fatal(err)
+	}
+	stmts := pgaccess.PrivilegeStatements("orders", "orders_owner", nil, nil, pgaccess.Connect{Restricted: true, Roles: []string{"cnpg_metrics_exporter"}})
+	if !reflect.DeepEqual(s.executed, [][]string{stmts}) {
+		t.Fatalf("executed = %q", s.executed)
 	}
 }

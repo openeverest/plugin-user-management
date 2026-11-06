@@ -163,6 +163,9 @@ type DesiredDatabase struct {
 	// OwnerPassword is where the owner's password is kept, for engines that
 	// act in the database as its owner.
 	OwnerPassword SecretKeyRef
+	// RestrictConnect lets only the owner and the users granted a role on
+	// the database connect to it, instead of every user.
+	RestrictConnect bool
 }
 
 // DatabaseEngine is implemented by engines that manage the databases of an

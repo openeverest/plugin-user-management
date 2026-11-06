@@ -91,7 +91,7 @@ func TestSyncDatabase(t *testing.T) {
 		{`CREATE DATABASE "orders" OWNER "o"`, `COMMENT ON DATABASE "orders" IS 'Managed by OpenEverest'`},
 		{`CREATE ROLE "oe_orders_read" WITH NOLOGIN`, `COMMENT ON ROLE "oe_orders_read" IS 'Managed by OpenEverest'`},
 		{`CREATE ROLE "oe_orders_readwrite" WITH NOLOGIN`, `COMMENT ON ROLE "oe_orders_readwrite" IS 'Managed by OpenEverest'`},
-		pgaccess.PrivilegeStatements("orders", "o", nil, s.objects),
+		pgaccess.PrivilegeStatements("orders", "o", nil, s.objects, pgaccess.Connect{}),
 	}
 	if !reflect.DeepEqual(s.executed, want) {
 		t.Fatalf("executed =\n%q\nwant\n%q", s.executed, want)
@@ -180,5 +180,17 @@ func TestReleaseDatabase(t *testing.T) {
 	err := e.ReleaseDatabase(ctx, target, "orders", true)
 	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), "2 other sessions") {
 		t.Fatalf("err = %v, want ErrInProgress with the reason", err)
+	}
+}
+
+func TestSyncDatabaseRestrictConnect(t *testing.T) {
+	s := &fakeSession{existing: []string{"_crunchypgbouncer", "everest-monitor"}}
+	e := newTestEngine(s, pgCluster(providerSpec(), "ready"))
+	if err := e.SyncDatabase(context.Background(), target, engine.DesiredDatabase{Name: "orders", Owner: "o", RestrictConnect: true}); err != nil {
+		t.Fatal(err)
+	}
+	want := pgaccess.PrivilegeStatements("orders", "o", nil, nil, pgaccess.Connect{Restricted: true, Roles: []string{"_crunchypgbouncer", "everest-monitor"}})
+	if got := s.executed[len(s.executed)-1]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("executed =\n%q\nwant\n%q", got, want)
 	}
 }

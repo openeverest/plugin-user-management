@@ -91,6 +91,8 @@ type session interface {
 	// grantTargets runs pgaccess.SchemasQuery and pgaccess.ObjectsQuery for
 	// the groups in the session's database.
 	grantTargets(ctx context.Context, read, readWrite string) ([]string, []pgaccess.Object, error)
+	// existingRoles returns which of the roles exist.
+	existingRoles(ctx context.Context, names []string) ([]string, error)
 	close(ctx context.Context)
 }
 
@@ -248,6 +250,18 @@ func (s *pgxSession) grantTargets(ctx context.Context, read, readWrite string) (
 		return nil, nil, fmt.Errorf("list objects: %w", err)
 	}
 	return schemas, objects, nil
+}
+
+func (s *pgxSession) existingRoles(ctx context.Context, names []string) ([]string, error) {
+	rows, err := s.conn.Query(ctx, pgaccess.ExistingRolesQuery, names)
+	if err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	roles, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	return roles, nil
 }
 
 func (s *pgxSession) close(ctx context.Context) {

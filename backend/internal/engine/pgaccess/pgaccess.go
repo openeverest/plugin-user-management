@@ -156,6 +156,20 @@ WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
       END
 ORDER BY 1`
 
+// ExistingRolesQuery returns which of the roles in $1 exist.
+const ExistingRolesQuery = `
+SELECT r.rolname FROM pg_catalog.pg_roles r WHERE r.rolname = ANY($1) ORDER BY 1`
+
+// Connect is who can connect to the database.
+type Connect struct {
+	// Restricted revokes CONNECT from PUBLIC; the owner, the group roles and
+	// superusers keep it.
+	Restricted bool
+	// Roles keep CONNECT when restricted: the operator's roles that connect
+	// to every database, such as its connection pooler's. They must exist.
+	Roles []string
+}
+
 // Object is a table, view or sequence, by its quoted qualified name.
 type Object struct {
 	Name     string
@@ -163,15 +177,29 @@ type Object struct {
 }
 
 // PrivilegeStatements returns the statements that give the database's group
-// roles their access, run in the database by its owner or a superuser, in
-// one transaction: the schemas and objects come from SchemasQuery and
-// ObjectsQuery. All statements are idempotent. Default privileges cover
-// schemas and objects the owner creates later.
-func PrivilegeStatements(database, owner string, schemas []string, objects []Object) []string {
+// roles their access, and set who else can connect, run in the database by
+// its owner or a superuser, in one transaction: the schemas and objects come
+// from SchemasQuery and ObjectsQuery. All statements are idempotent, so
+// switching connect back to public undoes the restriction. Default
+// privileges cover schemas and objects the owner creates later.
+func PrivilegeStatements(database, owner string, schemas []string, objects []Object, connect Connect) []string {
 	read := ident(GroupRole(database, RoleRead))
 	readWrite := ident(GroupRole(database, RoleReadWrite))
 	both := read + ", " + readWrite
-	stmts := []string{fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", ident(database), both)}
+	db := ident(database)
+	stmts := []string{fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", db, both)}
+	if connect.Restricted {
+		stmts = append(stmts, fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", db))
+		if len(connect.Roles) > 0 {
+			roles := make([]string, 0, len(connect.Roles))
+			for _, r := range connect.Roles {
+				roles = append(roles, ident(r))
+			}
+			stmts = append(stmts, fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", db, strings.Join(roles, ", ")))
+		}
+	} else {
+		stmts = append(stmts, fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO PUBLIC", db))
+	}
 	for _, schema := range schemas {
 		stmts = append(stmts, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", schema, both))
 	}

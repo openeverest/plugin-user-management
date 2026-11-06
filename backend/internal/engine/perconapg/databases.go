@@ -117,11 +117,22 @@ func (e *Engine) grantAccess(ctx context.Context, c cluster, want engine.Desired
 	if err != nil {
 		return inProgress(err, "PostgreSQL can't list the database's objects")
 	}
-	if err := s.exec(ctx, pgaccess.PrivilegeStatements(want.Name, want.Owner, schemas, objects)); err != nil {
+	connect := pgaccess.Connect{Restricted: want.RestrictConnect}
+	if connect.Restricted {
+		if connect.Roles, err = s.existingRoles(ctx, connectRoles); err != nil {
+			return inProgress(err, "PostgreSQL can't list the roles that connect to every database")
+		}
+	}
+	if err := s.exec(ctx, pgaccess.PrivilegeStatements(want.Name, want.Owner, schemas, objects, connect)); err != nil {
 		return inProgress(err, "PostgreSQL can't grant access to the database")
 	}
 	return nil
 }
+
+// connectRoles are the operator's and provider's roles that connect to every
+// database: PgBouncer runs its auth_query in the client's database as
+// _crunchypgbouncer, and the monitoring users collect per-database metrics.
+var connectRoles = []string{"_crunchypgbouncer", "ccp_monitoring", "monitor", "everest-monitor"}
 
 // inProgress reports a server error as ErrInProgress with what failed;
 // other errors are returned as they are, to be retried.

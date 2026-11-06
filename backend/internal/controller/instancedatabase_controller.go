@@ -282,7 +282,10 @@ func (r *DatabaseReconciler) syncDatabases(ctx context.Context, eng engine.Datab
 			}
 		}
 		claimed[name] = true
-		err := eng.SyncDatabase(ctx, target, engine.DesiredDatabase{Name: name, Owner: s.owner, OwnerPassword: s.ownerPassword})
+		err := eng.SyncDatabase(ctx, target, engine.DesiredDatabase{
+			Name: name, Owner: s.owner, OwnerPassword: s.ownerPassword,
+			RestrictConnect: s.db.Spec.Connect == v1alpha1.ConnectGranted,
+		})
 		switch {
 		case errors.Is(err, engine.ErrInvalid):
 			s.fail(err.Error())

@@ -88,6 +88,7 @@ spec:
     instanceUserRef:
       name: orders-owner     # an InstanceUser of the same instance
   deletionPolicy: Retain     # Retain (default) | Delete
+  connect: Public            # Public (default) | Granted
 status:
   phase: Ready               # Pending | Ready | Failed | Deleting
   owner: orders_owner
@@ -118,8 +119,17 @@ status:
   with the reason until the database is dropped or given another owner.
 - Users get access to one database with the `read` and `readWrite` roles on
   it (see [Per-database roles](#per-database-roles)).
-- Users can still connect to any database (PostgreSQL grants `CONNECT` to
-  `PUBLIC`), but without a role on it they can't read or change its tables.
+- `connect` tells who can connect to the database. With `Public`,
+  PostgreSQL's default, every user can, but without a role on it they can't
+  read or change its tables. With `Granted` (`REVOKE CONNECT ... FROM
+  PUBLIC`) only its owner, the users granted `read` or `readWrite` on it and
+  superusers can, besides the operator's roles that connect to every
+  database, which keep `CONNECT` when they exist: PgBouncer's auth user
+  (`_crunchypgbouncer` on Percona, `cnpg_pooler_pgbouncer` on
+  CloudNativePG), CloudNativePG's metrics exporter and the monitoring users.
+  Users with a predefined role such as `pg_read_all_data` can't connect to a
+  `Granted` database without a role on it. Switching back to `Public` grants
+  `CONNECT` to `PUBLIC` again.
 
 ### Per-database roles
 
@@ -551,8 +561,6 @@ GitHub release with notes.
   user API.
 - A Databases tab and API for InstanceDatabases, and InstanceDatabases for
   other engines.
-- Optionally restricting `CONNECT` on an InstanceDatabase to its owner and
-  the users granted a role on it, instead of `PUBLIC`.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.
 - Adopting existing database users into an InstanceUser.
 - Configurable role catalog per installation.

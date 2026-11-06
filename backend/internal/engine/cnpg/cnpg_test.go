@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,6 +59,7 @@ type fakeSession struct {
 	dbRoles  []dbRole
 	dbs      []dbDatabase
 	objects  []pgaccess.Object
+	existing []string
 	executed [][]string
 	execErr  error
 	// dialedAs records database/user of the connections made as a user.
@@ -67,7 +69,16 @@ type fakeSession struct {
 
 func (f *fakeSession) roles(context.Context) ([]dbRole, error)         { return f.dbRoles, nil }
 func (f *fakeSession) databases(context.Context) ([]dbDatabase, error) { return f.dbs, nil }
-func (f *fakeSession) close(context.Context)                           { f.closed = true }
+func (f *fakeSession) existingRoles(_ context.Context, names []string) ([]string, error) {
+	var found []string
+	for _, n := range names {
+		if slices.Contains(f.existing, n) {
+			found = append(found, n)
+		}
+	}
+	return found, nil
+}
+func (f *fakeSession) close(context.Context) { f.closed = true }
 func (f *fakeSession) grantTargets(context.Context, string, string) ([]string, []pgaccess.Object, error) {
 	return nil, f.objects, nil
 }

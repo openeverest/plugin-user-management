@@ -12,6 +12,14 @@ const (
 	DeletionPolicyDelete = "Delete"
 )
 
+// Who can connect to an InstanceDatabase.
+const (
+	// ConnectPublic lets every user connect, as PostgreSQL does by default.
+	ConnectPublic = "Public"
+	// ConnectGranted lets only the owner and users granted a role on the database connect.
+	ConnectGranted = "Granted"
+)
+
 // InstanceUserReference names an InstanceUser in the InstanceDatabase's namespace.
 type InstanceUserReference struct {
 	// +kubebuilder:validation:MinLength=1
@@ -44,6 +52,15 @@ type InstanceDatabaseSpec struct {
 	// +kubebuilder:default=Retain
 	// +optional
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
+	// Connect tells who can connect to the database. Public, PostgreSQL's
+	// default, lets every user connect, though only the owner and the users
+	// granted a role on the database can use its objects. Granted lets only
+	// those connect, besides superusers and the operator's own roles that
+	// connect to every database, such as its connection pooler's.
+	// +kubebuilder:validation:Enum=Public;Granted
+	// +kubebuilder:default=Public
+	// +optional
+	Connect string `json:"connect,omitempty"`
 }
 
 // InstanceDatabaseStatus is the observed state of an InstanceDatabase.

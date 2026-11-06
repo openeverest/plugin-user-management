@@ -58,6 +58,18 @@ spec:
           spec:
             description: InstanceDatabaseSpec declares a database of an instance.
             properties:
+              connect:
+                default: Public
+                description: |-
+                  Connect tells who can connect to the database. Public, PostgreSQL's
+                  default, lets every user connect, though only the owner and the users
+                  granted a role on the database can use its objects. Granted lets only
+                  those connect, besides superusers and the operator's own roles that
+                  connect to every database, such as its connection pooler's.
+                enum:
+                - Public
+                - Granted
+                type: string
               deletionPolicy:
                 default: Retain
                 description: |-

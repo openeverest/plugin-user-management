@@ -39,9 +39,10 @@ func TestMemberOfAndGrants(t *testing.T) {
 
 func TestPrivilegeStatements(t *testing.T) {
 	got := PrivilegeStatements("orders", "orders_owner", []string{"sales"},
-		[]Object{{Name: "sales.orders"}, {Name: `sales."Seq"`, Sequence: true}})
+		[]Object{{Name: "sales.orders"}, {Name: `sales."Seq"`, Sequence: true}}, Connect{})
 	want := []string{
 		`GRANT CONNECT ON DATABASE "orders" TO "oe_orders_read", "oe_orders_readwrite"`,
+		`GRANT CONNECT ON DATABASE "orders" TO PUBLIC`,
 		`GRANT USAGE ON SCHEMA sales TO "oe_orders_read", "oe_orders_readwrite"`,
 		`GRANT SELECT ON TABLE sales.orders TO "oe_orders_read"`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE sales.orders TO "oe_orders_readwrite"`,
@@ -76,5 +77,22 @@ func TestGroupRoleNoCollision(t *testing.T) {
 				t.Fatalf("%s: %q is a valid database name with group %q", role, crafted, hashed)
 			}
 		}
+	}
+}
+
+func TestPrivilegeStatementsRestrictConnect(t *testing.T) {
+	got := PrivilegeStatements("orders", "o", nil, nil, Connect{Restricted: true, Roles: []string{"_crunchypgbouncer", "everest-monitor"}})
+	want := []string{
+		`GRANT CONNECT ON DATABASE "orders" TO "oe_orders_read", "oe_orders_readwrite"`,
+		`REVOKE CONNECT ON DATABASE "orders" FROM PUBLIC`,
+		`GRANT CONNECT ON DATABASE "orders" TO "_crunchypgbouncer", "everest-monitor"`,
+	}
+	if !reflect.DeepEqual(got[:3], want) || strings.Contains(strings.Join(got, ";"), "TO PUBLIC") {
+		t.Fatalf("statements =\n%s", strings.Join(got, "\n"))
+	}
+	// Without operator roles to keep, only PUBLIC is revoked.
+	got = PrivilegeStatements("orders", "o", nil, nil, Connect{Restricted: true})
+	if got[1] != `REVOKE CONNECT ON DATABASE "orders" FROM PUBLIC` || strings.HasPrefix(got[2], "GRANT CONNECT") {
+		t.Fatalf("statements =\n%s", strings.Join(got, "\n"))
 	}
 }

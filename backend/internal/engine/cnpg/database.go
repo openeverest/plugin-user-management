@@ -188,11 +188,21 @@ func (e *Engine) grantAccess(ctx context.Context, c cluster, want engine.Desired
 	if err != nil {
 		return inProgress(err, "PostgreSQL can't list the database's objects")
 	}
-	if err := s.exec(ctx, pgaccess.PrivilegeStatements(want.Name, want.Owner, schemas, objects)); err != nil {
+	connect := pgaccess.Connect{Restricted: want.RestrictConnect}
+	if connect.Restricted {
+		if connect.Roles, err = s.existingRoles(ctx, connectRoles); err != nil {
+			return inProgress(err, "PostgreSQL can't list the roles that connect to every database")
+		}
+	}
+	if err := s.exec(ctx, pgaccess.PrivilegeStatements(want.Name, want.Owner, schemas, objects, connect)); err != nil {
 		return inProgress(err, "PostgreSQL can't grant access to the database")
 	}
 	return nil
 }
+
+// connectRoles are the operator's roles that connect to every database: the
+// metrics exporter runs per-database queries, and Poolers authenticate users.
+var connectRoles = []string{"cnpg_pooler_pgbouncer", "cnpg_metrics_exporter"}
 
 // inProgress reports a server error as ErrInProgress with what failed;
 // other errors are returned as they are, to be retried.

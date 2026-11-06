@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,6 +59,7 @@ type fakeSession struct {
 	schemas  []string
 	objects  []pgaccess.Object
 	dialed   []string
+	existing []string
 	executed [][]string
 	execErr  error
 	closed   bool
@@ -78,6 +80,15 @@ func (f *fakeSession) exec(_ context.Context, stmts []string) error {
 func (f *fakeSession) execEach(ctx context.Context, stmts []string) error { return f.exec(ctx, stmts) }
 func (f *fakeSession) grantTargets(context.Context, string, string) ([]string, []pgaccess.Object, error) {
 	return f.schemas, f.objects, nil
+}
+func (f *fakeSession) existingRoles(_ context.Context, names []string) ([]string, error) {
+	var found []string
+	for _, n := range names {
+		if slices.Contains(f.existing, n) {
+			found = append(found, n)
+		}
+	}
+	return found, nil
 }
 func (f *fakeSession) close(context.Context) { f.closed = true }
 
