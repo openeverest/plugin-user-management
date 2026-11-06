@@ -28,10 +28,10 @@ func databaseObjectName(instance, database string) string {
 // ValidateDatabase implements engine.DatabaseEngine.
 func (e *Engine) ValidateDatabase(name string) error {
 	if name == "" || len(name) > maxUsernameBytes {
-		return fmt.Errorf("%w: PostgreSQL database names are 1 to %d characters", engine.ErrInvalid, maxUsernameBytes)
+		return fmt.Errorf("%w: PostgreSQL database names are 1 to %d characters", engine.ErrInvalidDatabase, maxUsernameBytes)
 	}
 	if slices.Contains(reservedDatabases, name) {
-		return fmt.Errorf("%w: database %q is reserved", engine.ErrInvalid, name)
+		return fmt.Errorf("%w: database %q is reserved", engine.ErrInvalidDatabase, name)
 	}
 	return nil
 }
@@ -114,7 +114,7 @@ func (e *Engine) SyncDatabase(ctx context.Context, target engine.Target, want en
 		return err
 	}
 	if reserved[want.Name] {
-		return fmt.Errorf("%w: database %q is reserved for the operator", engine.ErrInvalid, want.Name)
+		return fmt.Errorf("%w: database %q is reserved for the operator", engine.ErrInvalidDatabase, want.Name)
 	}
 	obj := databaseApplyConfiguration(c, want)
 	if err := e.apply(ctx, obj); err != nil {

@@ -13,10 +13,10 @@ var _ engine.DatabaseEngine = (*Engine)(nil)
 // ValidateDatabase implements engine.DatabaseEngine.
 func (e *Engine) ValidateDatabase(name string) error {
 	if name == "" || len(name) > maxUsernameBytes {
-		return fmt.Errorf("%w: PostgreSQL database names are 1 to %d characters", engine.ErrInvalid, maxUsernameBytes)
+		return fmt.Errorf("%w: PostgreSQL database names are 1 to %d characters", engine.ErrInvalidDatabase, maxUsernameBytes)
 	}
 	if slices.Contains(reservedDatabases, name) {
-		return fmt.Errorf("%w: database %q is reserved", engine.ErrInvalid, name)
+		return fmt.Errorf("%w: database %q is reserved", engine.ErrInvalidDatabase, name)
 	}
 	return nil
 }
@@ -61,7 +61,7 @@ func (e *Engine) SyncDatabase(ctx context.Context, target engine.Target, want en
 	}
 	defer s.close(ctx)
 	if c.systemDatabases[want.Name] {
-		return fmt.Errorf("%w: database %q is reserved for the operator", engine.ErrInvalid, want.Name)
+		return fmt.Errorf("%w: database %q is reserved for the operator", engine.ErrInvalidDatabase, want.Name)
 	}
 	current, err := findDatabase(ctx, s, want.Name)
 	if err != nil {
@@ -100,8 +100,9 @@ func planDatabase(want engine.DesiredDatabase, current *dbDatabase) []string {
 
 // ReleaseDatabase implements engine.DatabaseEngine. Only databases the
 // plugin created are touched: dropped, or unmarked so they're no longer
-// managed. PostgreSQL refuses to drop a database with open sessions; its
-// error is reported until they're closed.
+// managed. Idle sessions, such as PgBouncer's pooled server connections, are
+// closed before dropping; PostgreSQL refuses to drop a database while
+// sessions run queries or transactions, and its error is reported until they end.
 func (e *Engine) ReleaseDatabase(ctx context.Context, target engine.Target, name string, drop bool) error {
 	if e.ValidateDatabase(name) != nil {
 		return nil
@@ -118,11 +119,15 @@ func (e *Engine) ReleaseDatabase(ctx context.Context, target engine.Target, name
 	if err != nil || current == nil || !current.managed() {
 		return err
 	}
-	stmt := fmt.Sprintf("COMMENT ON DATABASE %s IS NULL", quoteIdent(name))
+	stmts := []string{fmt.Sprintf("COMMENT ON DATABASE %s IS NULL", quoteIdent(name))}
 	if drop {
-		stmt = "DROP DATABASE IF EXISTS " + quoteIdent(name)
+		stmts = []string{
+			fmt.Sprintf("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "+
+				"WHERE datname = %s AND state = 'idle' AND pid <> pg_catalog.pg_backend_pid()", quoteLiteral(name)),
+			"DROP DATABASE IF EXISTS " + quoteIdent(name),
+		}
 	}
-	if err := s.execEach(ctx, []string{stmt}); err != nil {
+	if err := s.execEach(ctx, stmts); err != nil {
 		if reason := postgresReason(err); reason != "" {
 			return fmt.Errorf("%w: PostgreSQL can't drop the database: %s", engine.ErrInProgress, reason)
 		}

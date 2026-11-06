@@ -95,11 +95,20 @@ type Engine interface {
 var (
 	// ErrInvalid wraps errors caused by an invalid user declaration.
 	ErrInvalid = errors.New("invalid user")
+	// ErrInvalidDatabase wraps errors caused by an invalid database
+	// declaration; it is also an ErrInvalid.
+	ErrInvalidDatabase error = invalidError("invalid database")
 	// ErrNotReady means the instance's database can't be reached yet.
 	ErrNotReady = errors.New("instance is not ready")
 	// ErrInProgress means the operator is still carrying out a change.
 	ErrInProgress = errors.New("in progress")
 )
+
+// invalidError is an ErrInvalid with its own message.
+type invalidError string
+
+func (e invalidError) Error() string        { return string(e) }
+func (e invalidError) Is(target error) bool { return target == ErrInvalid }
 
 // PendingReasoner is implemented by engines whose operator reports why a
 // declared user isn't applied yet.

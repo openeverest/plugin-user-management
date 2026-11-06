@@ -80,6 +80,10 @@ type databaseState struct {
 	phase    string
 	message  string
 	declared bool
+	// ownerProblem keeps the database from being declared; a conflict with
+	// an existing database is reported first, as it won't resolve itself.
+	ownerProblem string
+	ownerInvalid bool
 }
 
 func (s *databaseState) fail(message string) {
@@ -156,9 +160,9 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		var invalid errOwnerInvalid
 		switch {
 		case errors.As(err, &invalid):
-			s.fail(invalid.Error())
+			s.ownerProblem, s.ownerInvalid = invalid.Error(), true
 		case errors.As(err, &pending):
-			s.pending(pending.Error())
+			s.ownerProblem = pending.Error()
 		case err != nil:
 			return ctrl.Result{}, err
 		}
@@ -252,6 +256,14 @@ func (r *DatabaseReconciler) syncDatabases(ctx context.Context, eng engine.Datab
 				s.fail(fmt.Sprintf("database %q is reserved for the operator", name))
 			} else {
 				s.fail(fmt.Sprintf("database %q already exists and isn't managed by this InstanceDatabase", name))
+			}
+			continue
+		}
+		if s.ownerProblem != "" {
+			if s.ownerInvalid {
+				s.fail(s.ownerProblem)
+			} else {
+				s.pending(s.ownerProblem)
 			}
 			continue
 		}

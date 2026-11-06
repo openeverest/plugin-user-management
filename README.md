@@ -104,8 +104,9 @@ status:
   `plugin-user-management.plugins.openeverest.io/release-database`) with
   `Retain` stops managing the database and keeps it, so pruning it from Git
   never loses data; with `Delete` it drops the database. If PostgreSQL
-  refuses, e.g. while sessions are connected, the InstanceDatabase stays
-  `Deleting` with the reason. InstanceDatabases are owned by their Instance.
+  refuses, e.g. while sessions are using the database, the InstanceDatabase
+  stays `Deleting` with the reason (see the engines for how sessions are
+  handled). InstanceDatabases are owned by their Instance.
 - The owner's InstanceUser can't be deleted while it owns a database:
   PostgreSQL refuses to drop the role and the InstanceUser stays `Deleting`
   with the reason until the database is dropped or given another owner.
@@ -203,7 +204,8 @@ what it depends on (the operator's resources, Secrets).
   `<instance>-<database>-<hash>`, owned by the `Cluster`, labeled with the
   instance, with the `retain` reclaim policy. Releasing it deletes the
   `Database`; dropping it switches the policy to `delete` first, and the
-  operator runs `DROP DATABASE`. CloudNativePG's error for a `Database` is
+  operator runs `DROP DATABASE`, which waits for every session on the
+  database to close. CloudNativePG's error for a `Database` is
   shown on the InstanceDatabase.
 - The application database (`spec.bootstrap.initdb.database`) and databases
   that other `Database` resources declare, such as the provider's own for
@@ -245,9 +247,12 @@ itself, and never drops users. So the plugin manages users in SQL and leaves
 - Until the `PerconaPGCluster` is `ready`, users stay `Pending`.
 - InstanceDatabases are created with `CREATE DATABASE ... OWNER` and
   commented `Managed by OpenEverest`; owner changes run `ALTER DATABASE ...
-  OWNER TO`. Releasing removes the comment; dropping runs `DROP DATABASE`
-  (without `FORCE`, so connected sessions keep it until they close). Only
-  databases with the comment are ever dropped. The databases listed in
+  OWNER TO`. Releasing removes the comment. Dropping first closes the
+  database's idle sessions, such as PgBouncer's pooled server connections,
+  which would otherwise block it for up to PgBouncer's `server_idle_timeout`
+  after applications disconnect, then runs `DROP DATABASE` without `FORCE`:
+  sessions running a query or a transaction keep the InstanceDatabase
+  `Deleting` until they end. Only databases with the comment are ever dropped. The databases listed in
   `spec.users[].databases`, which the operator creates owned by `postgres`,
   are reserved.
 

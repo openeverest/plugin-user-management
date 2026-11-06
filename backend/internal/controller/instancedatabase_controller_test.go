@@ -208,10 +208,13 @@ func TestDatabaseNoTakeover(t *testing.T) {
 		instanceDatabase("system", "app", "o"),
 		instanceDatabase("reserved", "postgres", "o"),
 		instanceDatabase("first", "dup", "o"),
-		instanceDatabase("second", "dup", "o"))
-	h.engine.dbs = []engine.Database{{Name: "existing", Owner: "someone"}, {Name: "app", System: true}}
+		instanceDatabase("second", "dup", "o"),
+		instanceDatabase("existing-no-owner", "existing2", "nobody"))
+	h.engine.dbs = []engine.Database{{Name: "existing", Owner: "someone"}, {Name: "app", System: true}, {Name: "existing2"}}
 
 	h.reconcile()
+	// A conflict is reported before the owner, which may still appear.
+	h.expectPhase("existing-no-owner", v1alpha1.PhaseFailed, `database "existing2" already exists`)
 	h.expectPhase("existing", v1alpha1.PhaseFailed, `database "existing" already exists and isn't managed`)
 	h.expectPhase("system", v1alpha1.PhaseFailed, `database "app" is reserved for the operator`)
 	h.expectPhase("reserved", v1alpha1.PhaseFailed, `database "postgres" is reserved`)

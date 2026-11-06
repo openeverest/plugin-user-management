@@ -19,8 +19,8 @@ func TestValidateDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"", "postgres", "template0", "template1", strings.Repeat("a", 64)} {
-		if err := e.ValidateDatabase(name); !errors.Is(err, engine.ErrInvalid) {
-			t.Errorf("%q: err = %v, want ErrInvalid", name, err)
+		if err := e.ValidateDatabase(name); !errors.Is(err, engine.ErrInvalid) || !strings.HasPrefix(err.Error(), "invalid database: ") {
+			t.Errorf("%q: err = %v, want an invalid database error", name, err)
 		}
 	}
 }
@@ -127,7 +127,10 @@ func TestReleaseDatabase(t *testing.T) {
 	if err := e.ReleaseDatabase(ctx, target, "orders", true); err != nil {
 		t.Fatal(err)
 	}
-	want := [][]string{{`COMMENT ON DATABASE "orders" IS NULL`}, {`DROP DATABASE IF EXISTS "orders"`}}
+	want := [][]string{{`COMMENT ON DATABASE "orders" IS NULL`}, {
+		`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = 'orders' AND state = 'idle' AND pid <> pg_catalog.pg_backend_pid()`,
+		`DROP DATABASE IF EXISTS "orders"`,
+	}}
 	if !reflect.DeepEqual(s.executed, want) {
 		t.Fatalf("executed = %v", s.executed)
 	}
