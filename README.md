@@ -7,12 +7,12 @@ are API keys: one per application, team or person, instead of one shared key
 per model.
 
 Users are declared as Kubernetes resources, `InstanceUser`, and reconciled
-into the instance's database. Create them from the **Users** tab on the
+into the instance's database. Create them from the **Access** tab on the
 instance page or with `kubectl`/GitOps; either way the plugin keeps the
 database in sync, stores generated credentials in a Secret applications can
 mount, and drops the user when the resource is deleted. On PostgreSQL, the
 databases of an instance and their owners are declared the same way, as
-`InstanceDatabase`s, from the **Databases** tab or with `kubectl`/GitOps.
+`InstanceDatabase`s, from the same tab or with `kubectl`/GitOps.
 
 Supported providers:
 
@@ -73,13 +73,13 @@ See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
 ## InstanceDatabase
 
 Supported for `provider-cloudnative-pg` and `provider-percona-postgresql`.
-Manage them from the instance's **Databases** tab, which lists the managed
-databases with their owner, who can connect and status, next to the
-instance's other databases. There you create a database for an owner (a user
-of the instance; it needs no roles), change its owner or who can connect, and
-delete it, keeping its data or, after typing its name, dropping it. In the
-**Users** tab, `read` and `readWrite` are granted on one of these databases,
-picked from a list.
+Manage them from the **Databases** section of the instance's **Access** tab,
+next to **Users**. It lists the managed databases with their owner, who can
+connect and status, next to the instance's other databases. There you create
+a database for an owner (a user of the instance; it needs no roles), change
+its owner or who can connect, and delete it, keeping its data or, after
+typing its name, dropping it. In the **Users** section, `read` and
+`readWrite` are granted on one of these databases, picked from a list.
 
 ```yaml
 apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
@@ -175,7 +175,7 @@ See [examples/instancedatabase.yaml](examples/instancedatabase.yaml).
 
 ```mermaid
 flowchart LR
-  UI["Users tab"] -->|user token| ES[everest-server<br/>plugin proxy]
+  UI["Access tab"] -->|user token| ES[everest-server<br/>plugin proxy]
   ES --> API[plugin API]
   API -->|authorize as the user| EV[Everest API]
   API -->|InstanceUser, Secret| K8S[(Kubernetes)]
@@ -331,7 +331,7 @@ format described in provider-kserve's
 (section 6.1), so the request path, quotas and metrics need no changes:
 
 - The password is the API key, generated as `oe_sk_<random>` like the
-  provider's own keys. The API and the Users tab never take a chosen key: the
+  provider's own keys. The API and the Access tab never take a chosen key: the
   provider disables every key whose value repeats another one. A
   `passwordSecretRef` (kubectl only) must hold 32 to 128 printable ASCII
   characters without spaces.
@@ -350,7 +350,7 @@ format described in provider-kserve's
   digits, `-`, `_` or `.`, starting and ending with a letter or digit.
 - The credentials Secret also holds `uri`, the Gateway's OpenAI base URL, and
   `model`, the name clients send in the `model` field, both read from the
-  Instance's connection Secret. The Users tab says "API key" instead of
+  Instance's connection Secret. The Access tab says "API key" instead of
   "password" and always generates keys.
 - The model's own key from its connection details is listed as a system user
   named after the Instance. Keys other tools wrote for the model are listed as
@@ -398,7 +398,7 @@ engine's RBAC to the chart and the provider to the tab's `providers` (in
 
 | Action (UI/API) | Requires (Everest RBAC) |
 |---|---|
-| See the Users tab | `use` on the plugin (`plugins`, `<cluster>/plugin-user-management`) |
+| See the Access tab | `use` on the plugin (`plugins`, `<cluster>/plugin-user-management`) |
 | List users | `read` on the instance |
 | Create, change roles, show credentials, reset password, delete | `read-connection` on the instance |
 
@@ -452,7 +452,7 @@ with no migration:
    the database and revokes their API keys.
 2. Upgrade the chart (apply the new CRD first, as above).
 3. Re-create the users as `InstanceUser`s: from your GitOps manifests with
-   `kind` changed, or in the Users tab. The backup shows what they were. They
+   `kind` changed, or in the Access tab. The backup shows what they were. They
    get new passwords and API keys, so update the applications that use them.
 4. Delete the old CRD.
 
@@ -478,8 +478,7 @@ done
 
 | Value | Default | Description |
 |---|---|---|
-| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Users tab |
-| `plugin.extensionPoints[1].providers` | `[provider-cloudnative-pg, provider-percona-postgresql]` | Providers that get the Databases tab |
+| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Access tab; it has a Databases section where the engine manages databases |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
 The chart's ClusterRole lets the backend manage InstanceUsers,

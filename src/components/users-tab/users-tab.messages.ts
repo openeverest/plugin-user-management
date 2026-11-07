@@ -2,7 +2,6 @@ import { UserPhase } from 'types/users.types';
 import { UserAction } from './users-tab.types';
 
 export const Messages = {
-  tabLabel: 'Users',
   loadFailed: (reason: string) => `Failed to load users: ${reason}`,
   readOnly:
     "You can view users. Creating and changing them takes permission to read this instance's connection details.",
