@@ -32,6 +32,11 @@ spec:
   # Granted lets only the owner and users granted a role on it connect;
   # Public (default) lets every user connect.
   connect: Granted
+  # PostgreSQL-only: extensions to create in the database, out of those the
+  # instance has and the plugin's policy allows.
+  postgresql:
+    extensions:
+      - name: pg_trgm
 ---
 # The orders service reads and writes the orders database, including the
 # tables orders-owner creates later, and nothing else.

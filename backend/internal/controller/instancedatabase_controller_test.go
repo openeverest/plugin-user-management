@@ -50,6 +50,13 @@ func (f *fakeDatabaseEngine) SyncDatabase(_ context.Context, _ engine.Target, db
 	return f.syncDBErr
 }
 
+// fakePostgreSQLEngine is a fakeDatabaseEngine of PostgreSQL instances.
+type fakePostgreSQLEngine struct{ *fakeDatabaseEngine }
+
+func (f fakePostgreSQLEngine) AvailableExtensions(context.Context, engine.Target) ([]engine.PostgreSQLExtension, error) {
+	return nil, nil
+}
+
 func (f *fakeDatabaseEngine) ReleaseDatabase(_ context.Context, _ engine.Target, name string, drop bool) error {
 	f.released = append(f.released, release{name, drop})
 	return f.releaseErr
@@ -103,7 +110,8 @@ func newDBHarness(t *testing.T, objs ...client.Object) *dbHarness {
 		Build()
 	eng := &fakeDatabaseEngine{}
 	return &dbHarness{t: t, client: c, engine: eng, r: &DatabaseReconciler{Client: c, Engines: map[string]engine.Engine{
-		"provider-cloudnative-pg": eng,
+		"provider-cloudnative-pg": fakePostgreSQLEngine{eng},
+		"other-databases":         eng,
 		"percona-server-mongodb":  &fakeEngine{},
 	}}}
 }
@@ -432,5 +440,98 @@ func TestDatabaseRestrictConnectPassed(t *testing.T) {
 	h.reconcile()
 	if len(h.engine.syncedDBs) != 1 || !h.engine.syncedDBs[0].RestrictConnect {
 		t.Fatalf("synced = %+v", h.engine.syncedDBs)
+	}
+}
+
+func withExtensions(db *v1alpha1.InstanceDatabase, names ...string) *v1alpha1.InstanceDatabase {
+	db.Spec.PostgreSQL = &v1alpha1.PostgreSQLDatabaseOptions{}
+	for _, n := range names {
+		db.Spec.PostgreSQL.Extensions = append(db.Spec.PostgreSQL.Extensions, v1alpha1.PostgreSQLExtension{Name: n})
+	}
+	return db
+}
+
+func TestDatabaseExtensions(t *testing.T) {
+	h := newDBHarness(t, instance("provider-cloudnative-pg"),
+		owner("o", "o", "mongo", v1alpha1.PhaseReady),
+		withExtensions(instanceDatabase("orders", "orders", "o"), "vector", "pg_trgm"))
+	h.reconcile()
+	h.engine.dbs = []engine.Database{{Name: "orders", Owner: "o"}}
+	h.reconcile()
+	last := h.engine.syncedDBs[len(h.engine.syncedDBs)-1]
+	if !reflect.DeepEqual(last.PostgreSQL, &engine.PostgreSQLDatabase{Extensions: []string{"pg_trgm", "vector"}}) {
+		t.Fatalf("postgresql = %+v", last.PostgreSQL)
+	}
+	db := h.expectPhase("orders", v1alpha1.PhaseReady, "")
+	if db.Status.PostgreSQL == nil || !reflect.DeepEqual(db.Status.PostgreSQL.Extensions, []string{"pg_trgm", "vector"}) {
+		t.Fatalf("managed = %+v", db.Status.PostgreSQL)
+	}
+
+	// Removing one drops it; while that's refused it stays managed.
+	db.Spec.PostgreSQL.Extensions = db.Spec.PostgreSQL.Extensions[:1]
+	if err := h.client.Update(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.syncDBErr = errors.Join(engine.ErrInProgress, errors.New("can't drop pg_trgm: other objects depend on it"))
+	h.reconcile()
+	last = h.engine.syncedDBs[len(h.engine.syncedDBs)-1]
+	if !reflect.DeepEqual(last.PostgreSQL, &engine.PostgreSQLDatabase{Extensions: []string{"vector"}, DropExtensions: []string{"pg_trgm"}}) {
+		t.Fatalf("postgresql = %+v", last.PostgreSQL)
+	}
+	db = h.expectPhase("orders", v1alpha1.PhasePending, "other objects depend on it")
+	if !reflect.DeepEqual(db.Status.PostgreSQL.Extensions, []string{"pg_trgm", "vector"}) {
+		t.Fatalf("managed = %+v", db.Status.PostgreSQL)
+	}
+
+	h.engine.syncDBErr = nil
+	h.reconcile()
+	db = h.expectPhase("orders", v1alpha1.PhaseReady, "")
+	if !reflect.DeepEqual(db.Status.PostgreSQL.Extensions, []string{"vector"}) {
+		t.Fatalf("managed = %+v", db.Status.PostgreSQL)
+	}
+
+	// Removing them all drops the last one and clears the status.
+	db.Spec.PostgreSQL = nil
+	if err := h.client.Update(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile()
+	last = h.engine.syncedDBs[len(h.engine.syncedDBs)-1]
+	if !reflect.DeepEqual(last.PostgreSQL, &engine.PostgreSQLDatabase{DropExtensions: []string{"vector"}}) {
+		t.Fatalf("postgresql = %+v", last.PostgreSQL)
+	}
+	if db = h.get("orders"); db.Status.PostgreSQL != nil {
+		t.Fatalf("status = %+v", db.Status.PostgreSQL)
+	}
+	h.reconcile()
+	if last = h.engine.syncedDBs[len(h.engine.syncedDBs)-1]; last.PostgreSQL != nil {
+		t.Fatalf("postgresql = %+v", last.PostgreSQL)
+	}
+}
+
+func TestDatabaseExtensionsForbidden(t *testing.T) {
+	h := newDBHarness(t, instance("provider-cloudnative-pg"),
+		owner("o", "o", "mongo", v1alpha1.PhaseReady),
+		withExtensions(instanceDatabase("orders", "orders", "o"), "file_fdw"))
+	h.engine.syncDBErr = errors.Join(engine.ErrInvalidDatabase, errors.New("extensions file_fdw can't be created"))
+	h.reconcile()
+	if db := h.expectPhase("orders", v1alpha1.PhaseFailed, "file_fdw"); db.Status.PostgreSQL != nil {
+		t.Fatalf("forbidden extension recorded as managed: %+v", db.Status.PostgreSQL)
+	}
+}
+
+// The PostgreSQL block is refused on other engines.
+func TestDatabasePostgreSQLOptionsOnOtherEngines(t *testing.T) {
+	inst := instance("other-databases")
+	h := newDBHarness(t, inst, owner("o", "o", "mongo", v1alpha1.PhaseReady),
+		withExtensions(instanceDatabase("orders", "orders", "o"), "vector"),
+		instanceDatabase("plain", "plain", "o"))
+	h.reconcile()
+	h.expectPhase("orders", v1alpha1.PhaseFailed, `spec.postgresql applies to PostgreSQL instances only, not to provider "other-databases"`)
+	h.expectPhase("plain", v1alpha1.PhasePending, "")
+	for _, d := range h.engine.syncedDBs {
+		if d.PostgreSQL != nil || d.Name == "orders" {
+			t.Fatalf("synced = %+v", h.engine.syncedDBs)
+		}
 	}
 }

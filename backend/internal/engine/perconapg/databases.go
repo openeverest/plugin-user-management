@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
-var _ engine.DatabaseEngine = (*Engine)(nil)
+var _ engine.PostgreSQLEngine = (*Engine)(nil)
 
 // ValidateDatabase implements engine.DatabaseEngine.
 func (e *Engine) ValidateDatabase(name string) error {
@@ -77,7 +78,83 @@ func (e *Engine) SyncDatabase(ctx context.Context, target engine.Target, want en
 	if err := ensureGroups(ctx, s, want.Name); err != nil {
 		return err
 	}
-	return e.grantAccess(ctx, c, want)
+	if err := e.grantAccess(ctx, c, want); err != nil {
+		return err
+	}
+	return e.syncExtensions(ctx, c, want)
+}
+
+// syncExtensions creates the wanted extensions and drops those the plugin
+// no longer manages, in the database, as the superuser. Drops don't
+// cascade: an extension that objects depend on stays, with PostgreSQL's
+// error reported.
+func (e *Engine) syncExtensions(ctx context.Context, c cluster, want engine.DesiredDatabase) error {
+	pg := want.PostgreSQL
+	if pg == nil || len(pg.Extensions)+len(pg.DropExtensions) == 0 {
+		return nil
+	}
+	s, err := e.dial(ctx, c, want.Name)
+	if err != nil {
+		return err
+	}
+	defer s.close(ctx)
+	available, err := s.availableExtensions(ctx)
+	if err != nil {
+		return err
+	}
+	forbidden, missing := e.extensions.Check(pg.Extensions, available)
+	if len(forbidden) > 0 {
+		return fmt.Errorf("%w: extensions %s can't be created: the plugin's policy doesn't allow them", engine.ErrInvalidDatabase, strings.Join(forbidden, ", "))
+	}
+	installed, err := s.installedExtensions(ctx)
+	if err != nil {
+		return err
+	}
+	var problems []string
+	for _, name := range pg.DropExtensions {
+		if !slices.Contains(installed, name) || slices.Contains(pg.Extensions, name) {
+			continue
+		}
+		if err := s.exec(ctx, []string{"DROP EXTENSION IF EXISTS " + quoteIdent(name)}); err != nil {
+			reason := pgaccess.ServerReason(err)
+			if reason == "" {
+				return err
+			}
+			problems = append(problems, "can't drop "+name+": "+reason)
+		}
+	}
+	for _, name := range pg.Extensions {
+		switch {
+		case slices.Contains(missing, name):
+			problems = append(problems, "extension "+name+" is not available on the instance")
+		case !slices.Contains(installed, name):
+			if err := s.exec(ctx, []string{"CREATE EXTENSION IF NOT EXISTS " + quoteIdent(name)}); err != nil {
+				reason := pgaccess.ServerReason(err)
+				if reason == "" {
+					return err
+				}
+				problems = append(problems, "can't create "+name+": "+reason)
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%w: %s", engine.ErrInProgress, strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// AvailableExtensions implements engine.PostgreSQLEngine.
+func (e *Engine) AvailableExtensions(ctx context.Context, target engine.Target) ([]engine.PostgreSQLExtension, error) {
+	_, s, err := e.connect(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	defer s.close(ctx)
+	available, err := s.availableExtensions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return e.extensions.Filter(available), nil
 }
 
 // ensureGroups creates the database's group roles, marked as managed.

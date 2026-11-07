@@ -170,6 +170,34 @@ type DesiredDatabase struct {
 	// RestrictConnect lets only the owner and the users granted a role on
 	// the database connect to it, instead of every user.
 	RestrictConnect bool
+	// PostgreSQL holds PostgreSQL-only options. Only PostgreSQLEngines get
+	// it; it's nil for other engines.
+	PostgreSQL *PostgreSQLDatabase
+}
+
+// PostgreSQLDatabase are the PostgreSQL-only options of a database.
+type PostgreSQLDatabase struct {
+	// Extensions to have in the database.
+	Extensions []string
+	// DropExtensions were managed by the plugin and are no longer wanted.
+	DropExtensions []string
+}
+
+// PostgreSQLExtension is an extension a database can be given.
+type PostgreSQLExtension struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// Trusted extensions can be created by a database's owner.
+	Trusted bool `json:"trusted"`
+}
+
+// PostgreSQLEngine is implemented by engines of PostgreSQL instances,
+// which accept DesiredDatabase.PostgreSQL in SyncDatabase.
+type PostgreSQLEngine interface {
+	DatabaseEngine
+	// AvailableExtensions lists the extensions the instance has that the
+	// plugin's policy lets users create.
+	AvailableExtensions(ctx context.Context, target Target) ([]PostgreSQLExtension, error)
 }
 
 // DatabaseEngine is implemented by engines that manage the databases of an

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +38,21 @@ type databaseView struct {
 	System  bool   `json:"system"`
 	Phase   string `json:"phase,omitempty"`
 	Message string `json:"message,omitempty"`
+	// PostgreSQL are the PostgreSQL-only options, for PostgreSQL instances.
+	PostgreSQL *postgresqlOptions `json:"postgresql,omitempty"`
+}
+
+// postgresqlOptions are a database's PostgreSQL-only options, in requests and views.
+type postgresqlOptions struct {
+	Extensions []string `json:"extensions"`
+}
+
+// postgresqlCapabilities are what PostgreSQL instances offer their databases.
+type postgresqlCapabilities struct {
+	// Extensions users may create, out of those the instance has.
+	Extensions []engine.PostgreSQLExtension `json:"extensions"`
+	// ExtensionsError explains why the extensions can't be listed.
+	ExtensionsError string `json:"extensionsError,omitempty"`
 }
 
 type databasesResponse struct {
@@ -46,18 +62,59 @@ type databasesResponse struct {
 	CanManage bool `json:"canManage"`
 	// DatabaseError explains why databases that exist only in the instance are missing.
 	DatabaseError string `json:"databaseError,omitempty"`
+	// PostgreSQL is set for PostgreSQL instances only.
+	PostgreSQL *postgresqlCapabilities `json:"postgresql,omitempty"`
 }
 
 type createDatabaseRequest struct {
 	Name string `json:"name"`
 	// OwnerID is the owner's InstanceUser.
-	OwnerID string `json:"ownerId"`
-	Connect string `json:"connect"`
+	OwnerID    string             `json:"ownerId"`
+	Connect    string             `json:"connect"`
+	PostgreSQL *postgresqlOptions `json:"postgresql"`
 }
 
 type updateDatabaseRequest struct {
 	OwnerID string `json:"ownerId"`
 	Connect string `json:"connect"`
+	// PostgreSQL replaces the options when set, and keeps them when omitted.
+	PostgreSQL *postgresqlOptions `json:"postgresql"`
+}
+
+// Mirrors the InstanceDatabase CRD's extension name pattern.
+var extensionNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
+// postgreSQLSpec validates requested PostgreSQL options and returns them as
+// the InstanceDatabase spec has them; nil for an empty list.
+func postgreSQLSpec(ctx context.Context, a access, req *postgresqlOptions) (*v1alpha1.PostgreSQLDatabaseOptions, error) {
+	if req == nil || len(req.Extensions) == 0 {
+		return nil, nil
+	}
+	pg, ok := a.engine.(engine.PostgreSQLEngine)
+	if !ok {
+		return nil, badRequest("postgresql options apply to PostgreSQL instances only")
+	}
+	// Fails fast for extensions that can't be created; the engine checks them either way.
+	allowed := map[string]bool{}
+	available, availErr := pg.AvailableExtensions(ctx, a.target)
+	for _, e := range available {
+		allowed[e.Name] = true
+	}
+	spec := &v1alpha1.PostgreSQLDatabaseOptions{}
+	seen := map[string]bool{}
+	for _, name := range req.Extensions {
+		if !extensionNamePattern.MatchString(name) {
+			return nil, badRequest("invalid extension name " + strconv.Quote(name))
+		}
+		if availErr == nil && !allowed[name] {
+			return nil, badRequest("extension " + strconv.Quote(name) + " can't be created on this instance")
+		}
+		if !seen[name] {
+			seen[name] = true
+			spec.Extensions = append(spec.Extensions, v1alpha1.PostgreSQLExtension{Name: name})
+		}
+	}
+	return spec, nil
 }
 
 func databaseEngine(a access) (engine.DatabaseEngine, error) {
@@ -128,6 +185,12 @@ func managedDatabaseView(db *v1alpha1.InstanceDatabase, owners map[string]string
 	if v.DeletionPolicy == "" {
 		v.DeletionPolicy = v1alpha1.DeletionPolicyRetain
 	}
+	if pg := db.Spec.PostgreSQL; pg != nil && len(pg.Extensions) > 0 {
+		v.PostgreSQL = &postgresqlOptions{Extensions: []string{}}
+		for _, e := range pg.Extensions {
+			v.PostgreSQL.Extensions = append(v.PostgreSQL.Extensions, e.Name)
+		}
+	}
 	if v.Phase == "" {
 		v.Phase = v1alpha1.PhasePending
 	}
@@ -188,6 +251,19 @@ func (s *server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 			resp.Databases = append(resp.Databases, databaseView{Name: d.Name, Owner: d.Owner, System: d.System})
 		}
 	}
+	if pg, ok := a.engine.(engine.PostgreSQLEngine); ok {
+		resp.PostgreSQL = &postgresqlCapabilities{Extensions: []engine.PostgreSQLExtension{}}
+		exts, err := pg.AvailableExtensions(ctx, a.target)
+		switch {
+		case errors.Is(err, engine.ErrNotReady):
+			resp.PostgreSQL.ExtensionsError = err.Error()
+		case err != nil:
+			log.Printf("list extensions of %s/%s: %v", a.target.Namespace, a.target.Instance, err)
+			resp.PostgreSQL.ExtensionsError = "the database can't be reached"
+		default:
+			resp.PostgreSQL.Extensions = exts
+		}
+	}
 
 	// Managed databases first, then other databases, then the system's.
 	rank := func(v databaseView) int {
@@ -245,6 +321,11 @@ func (s *server) handleCreateDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	pgSpec, err := postgreSQLSpec(ctx, a, req.PostgreSQL)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	declared, err := s.instanceDatabases(ctx, a.target)
 	if err != nil {
 		writeError(w, err)
@@ -278,6 +359,7 @@ func (s *server) handleCreateDatabase(w http.ResponseWriter, r *http.Request) {
 			Owner:          v1alpha1.DatabaseOwner{InstanceUserRef: v1alpha1.InstanceUserReference{Name: owner.Name}},
 			DeletionPolicy: v1alpha1.DeletionPolicyRetain,
 			Connect:        connect,
+			PostgreSQL:     pgSpec,
 		},
 	}
 	if err := s.kube.Create(ctx, db); err != nil {
@@ -321,6 +403,14 @@ func (s *server) handleUpdateDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orig := db.DeepCopy()
+	if req.PostgreSQL != nil {
+		pgSpec, err := postgreSQLSpec(ctx, a, req.PostgreSQL)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		db.Spec.PostgreSQL = pgSpec
+	}
 	db.Spec.Owner.InstanceUserRef.Name = owner.Name
 	db.Spec.Connect = connect
 	if err := s.kube.Patch(ctx, db, client.MergeFrom(orig)); err != nil {

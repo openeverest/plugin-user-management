@@ -77,3 +77,61 @@ describe('DeleteDatabaseDialog', () => {
     expect(onConfirm).toHaveBeenCalledWith(true);
   });
 });
+
+describe('DatabaseFormDialog extensions', () => {
+  afterEach(cleanup);
+
+  const extensions = [
+    { name: 'pg_trgm', trusted: true, description: 'text similarity' },
+    { name: 'vector', trusted: false, description: 'vector data type' },
+  ];
+
+  it('creates a database with the extensions picked', () => {
+    const onSubmit = vi.fn();
+    render(
+      <DatabaseFormDialog owners={owners} extensions={extensions} isSubmitting={false} onSubmit={onSubmit} onClose={vi.fn()} />
+    );
+    fireEvent.change(screen.getByLabelText(Messages.name), { target: { value: 'orders' } });
+    fireEvent.mouseDown(screen.getByLabelText(Messages.owner));
+    fireEvent.click(within(screen.getByRole('listbox', { name: Messages.owner })).getByText('orders_owner'));
+    fireEvent.mouseDown(screen.getByLabelText(Messages.extensions));
+    const options = screen.getByRole('listbox', { name: Messages.extensions });
+    expect(within(options).getByText('vector data type')).toBeTruthy();
+    fireEvent.click(within(options).getByText('vector'));
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'orders',
+      ownerId: 'pg-orders-owner',
+      connect: 'Public',
+      postgresql: { extensions: ['vector'] },
+    });
+  });
+
+  it('removes an extension when editing', () => {
+    const onSubmit = vi.fn();
+    render(
+      <DatabaseFormDialog
+        initial={{ name: 'orders', ownerId: 'pg-orders-owner', connect: 'Public', postgresql: { extensions: ['vector', 'pg_trgm'] } }}
+        owners={owners}
+        extensions={extensions}
+        isSubmitting={false}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(within(screen.getByRole('button', { name: 'vector' })).getByTestId('CancelIcon'));
+    fireEvent.click(screen.getByRole('button', { name: Messages.save }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'orders',
+      ownerId: 'pg-orders-owner',
+      connect: 'Public',
+      postgresql: { extensions: ['pg_trgm'] },
+    });
+  });
+
+  it('has no extension picker on other engines', () => {
+    const onSubmit = vi.fn();
+    render(<DatabaseFormDialog owners={owners} isSubmitting={false} onSubmit={onSubmit} onClose={vi.fn()} />);
+    expect(screen.queryByLabelText(Messages.extensions)).toBeNull();
+  });
+});

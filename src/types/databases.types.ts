@@ -16,6 +16,19 @@ export interface Database {
   system: boolean;
   phase?: UserPhase;
   message?: string;
+  // PostgreSQL-only options, on PostgreSQL instances.
+  postgresql?: PostgreSQLOptions;
+}
+
+export interface PostgreSQLOptions {
+  extensions: string[];
+}
+
+export interface PostgreSQLExtension {
+  name: string;
+  description?: string;
+  // Trusted extensions can be created by a database's owner.
+  trusted: boolean;
 }
 
 export interface DatabasesResponse {
@@ -24,11 +37,19 @@ export interface DatabasesResponse {
   supported: boolean;
   canManage: boolean;
   databaseError?: string;
+  // Set for PostgreSQL instances only.
+  postgresql?: {
+    // Extensions users may create, out of those the instance has.
+    extensions: PostgreSQLExtension[];
+    extensionsError?: string;
+  };
 }
 
 export interface DatabaseSettings {
   ownerId: string;
   connect: DatabaseConnect;
+  // Sent for PostgreSQL instances only; replaces the extensions.
+  postgresql?: PostgreSQLOptions;
 }
 
 export interface NewDatabase extends DatabaseSettings {

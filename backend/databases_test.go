@@ -21,7 +21,12 @@ const dbProvider = "provider-cloudnative-pg"
 // users may have no roles.
 type fakeDBEngine struct {
 	*fakeEngine
-	dbs []engine.Database
+	dbs        []engine.Database
+	extensions []engine.PostgreSQLExtension
+}
+
+func (f *fakeDBEngine) AvailableExtensions(context.Context, engine.Target) ([]engine.PostgreSQLExtension, error) {
+	return f.extensions, nil
 }
 
 func (f *fakeDBEngine) NormalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, error) {
@@ -248,5 +253,51 @@ func TestHiddenUsersNotListed(t *testing.T) {
 	body := env.do("GET", "/api/users"+testQuery, "").Body.String()
 	if strings.Contains(body, "oe_orders_read") || !strings.Contains(body, `"username":"postgres"`) {
 		t.Fatalf("users = %s", body)
+	}
+}
+
+func TestDatabaseExtensionsAPI(t *testing.T) {
+	env := newTestEnv(t, dbProvider, http.StatusOK, http.StatusOK,
+		declared("mongo-owner-1", "o", "mongo"),
+		instanceDB("mongo-billing-1", "billing", "mongo-owner-1"))
+	env.dbEngine.extensions = []engine.PostgreSQLExtension{{Name: "pg_trgm", Trusted: true}, {Name: "vector", Description: "vector type"}}
+
+	// The list offers the extensions and shows each database's.
+	body := env.do("GET", "/api/databases"+testQuery, "").Body.String()
+	if !strings.Contains(body, `"postgresql":{"extensions":[{"name":"pg_trgm","trusted":true},{"name":"vector","description":"vector type","trusted":false}]}`) {
+		t.Fatalf("list = %s", body)
+	}
+
+	rec := env.do("POST", "/api/databases"+testQuery, `{"name":"orders","ownerId":"mongo-owner-1","postgresql":{"extensions":["vector","pg_trgm","vector"]}}`)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"postgresql":{"extensions":["vector","pg_trgm"]}`) {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	var view databaseView
+	_ = json.Unmarshal(rec.Body.Bytes(), &view)
+	if db := env.instanceDatabase(view.ID); len(db.Spec.PostgreSQL.Extensions) != 2 || db.Spec.PostgreSQL.Extensions[0].Name != "vector" {
+		t.Fatalf("spec = %+v", db.Spec.PostgreSQL)
+	}
+
+	for name, body := range map[string]string{
+		"not offered":  `{"name":"x","ownerId":"mongo-owner-1","postgresql":{"extensions":["file_fdw"]}}`,
+		"invalid name": `{"name":"x","ownerId":"mongo-owner-1","postgresql":{"extensions":["Bad Name"]}}`,
+	} {
+		if rec := env.do("POST", "/api/databases"+testQuery, body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
+		}
+	}
+
+	// Updating without the block keeps the extensions; with it replaces them.
+	if rec := env.do("PUT", "/api/databases/"+view.ID+testQuery, `{"ownerId":"mongo-owner-1"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body)
+	}
+	if db := env.instanceDatabase(view.ID); db.Spec.PostgreSQL == nil || len(db.Spec.PostgreSQL.Extensions) != 2 {
+		t.Fatalf("kept = %+v", db.Spec.PostgreSQL)
+	}
+	if rec := env.do("PUT", "/api/databases/"+view.ID+testQuery, `{"ownerId":"mongo-owner-1","postgresql":{"extensions":[]}}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body)
+	}
+	if db := env.instanceDatabase(view.ID); db.Spec.PostgreSQL != nil {
+		t.Fatalf("cleared = %+v", db.Spec.PostgreSQL)
 	}
 }

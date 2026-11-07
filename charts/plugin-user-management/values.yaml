@@ -32,6 +32,26 @@ plugin:
         - provider-percona-postgresql
         - provider-kserve
 
+# PostgreSQL options of databases (InstanceDatabase spec.postgresql).
+postgresql:
+  # Extensions users may create in a database, out of those the instance has.
+  # Creating an extension runs as a superuser, so only allow extensions you
+  # trust users with: ones that read server files, connect to other servers
+  # or add untrusted languages (file_fdw, postgres_fdw, dblink, plpython3u,
+  # ...) are as powerful as superuser access.
+  extensions:
+    # PostgreSQL's trusted extensions (pg_trgm, pgcrypto, uuid-ossp, hstore,
+    # citext, ...), which a database's owner could create anyway.
+    allowTrusted: true
+    # Further extensions. Those that must be preloaded (timescaledb, ...) also
+    # need the provider's setting for the instance.
+    allowed:
+      - vector
+      - postgis
+      - timescaledb
+      - age
+      - pg_stat_statements
+
 # Optional override for the Everest API URL. When empty the backend discovers
 # the everest Service via Kubernetes-injected env vars (same namespace), then
 # falls back to http://everest.everest-system.svc.cluster.local:8080.

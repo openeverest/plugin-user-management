@@ -138,6 +138,52 @@ status:
   `Granted` database without a role on it. Switching back to `Public` grants
   `CONNECT` to `PUBLIC` again.
 
+### PostgreSQL options and extensions
+
+Options that only exist for one engine go in a block named after it, so the
+generic fields keep meaning the same thing on every engine. Other engines
+refuse the block, and the InstanceDatabase is `Failed`. PostgreSQL's block
+holds the database's extensions:
+
+```yaml
+kind: InstanceDatabase
+spec:
+  name: orders
+  owner: {instanceUserRef: {name: orders-owner}}
+  postgresql:
+    extensions:
+      - name: vector
+      - name: pg_trgm
+status:
+  postgresql:
+    extensions: [pg_trgm, vector]   # managed by the plugin
+```
+
+- **Which extensions:** those the instance has (`pg_available_extensions`) that
+  the plugin's policy allows. That's PostgreSQL's trusted extensions (`pg_trgm`,
+  `pgcrypto`, `uuid-ossp`, `hstore`, `citext`, ...), which a database's owner
+  could create anyway, plus the chart's `postgresql.extensions.allowed`
+  (default `vector`, `postgis`, `timescaledb`, `age`, `pg_stat_statements`).
+  Extensions that read server files, connect to other servers or add
+  untrusted languages are as powerful as superuser access, so they stay off
+  unless the admin lists them. `plpgsql` is never managed.
+- **Creating:** `CREATE EXTENSION` runs as a superuser, in the database. On
+  CloudNativePG it goes through the `Database` resource's `extensions`; on
+  Percona PostgreSQL it's SQL.
+- **Removing:** dropping one from the list runs `DROP EXTENSION` without
+  `CASCADE` (on CloudNativePG, `ensure: absent`). While objects use it, such as
+  a `vector` column, PostgreSQL refuses, and the InstanceDatabase is `Pending`
+  with the reason until they're dropped. `status.postgresql.extensions` is what
+  the plugin manages: declaring an extension the database already has puts it
+  under the plugin's management too.
+- **Can't be created yet:** an extension the instance doesn't have, or one
+  that must be preloaded (`timescaledb`, `pgaudit`, ...), keeps the database
+  `Pending` with PostgreSQL's reason. Installing and preloading extensions is
+  the provider's job, through its settings for the instance. An extension the
+  policy doesn't allow makes the database `Failed`.
+- In the **Access** tab's Databases section, extensions are picked from those
+  allowed, with their descriptions, and shown per database.
+
 ### Per-database roles
 
 ```yaml
@@ -478,6 +524,8 @@ done
 
 | Value | Default | Description |
 |---|---|---|
+| `postgresql.extensions.allowTrusted` | `true` | Let users create PostgreSQL's trusted extensions in databases |
+| `postgresql.extensions.allowed` | `[vector, postgis, timescaledb, age, pg_stat_statements]` | Further extensions users may create |
 | `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Access tab; it has a Databases section where the engine manages databases |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
@@ -511,8 +559,8 @@ permissions as users.
 | `POST /api/users/{id}/password` | `{password?}` | credentials |
 | `DELETE /api/users/{id}` | | `204` |
 | `GET /api/databases` | | `{databases, supported, canManage, databaseError?}` |
-| `POST /api/databases` | `{name, ownerId, connect?}` | `201` database |
-| `PUT /api/databases/{id}` | `{ownerId, connect?}` | `204` |
+| `POST /api/databases` | `{name, ownerId, connect?, postgresql?: {extensions}}` | `201` database |
+| `PUT /api/databases/{id}` | `{ownerId, connect?, postgresql?: {extensions}}` | `204`; without `postgresql` the extensions are kept |
 | `DELETE /api/databases/{id}` | | `204`; with `&drop=true` the database is dropped, otherwise kept |
 
 Credentials are `{id, username, password, uri?, secret, properties?}`;
@@ -523,8 +571,12 @@ is `apiKey`, the password must be empty and an `oe_sk_` API key is generated.
 `rolesRequired` is false when users may have no roles (PostgreSQL), and
 `databasesSupported` true when database-scoped roles are granted on the
 instance's managed databases. Databases are `{id?, name, owner?, ownerId?,
-connect?, deletionPolicy?, managed, system, phase?, message?}`; `ownerId` is
-the owner's InstanceUser and `connect` is `Public` or `Granted`. Databases
+connect?, deletionPolicy?, managed, system, phase?, message?, postgresql?}`;
+`ownerId` is the owner's InstanceUser and `connect` is `Public` or `Granted`.
+On PostgreSQL instances, `GET /api/databases` also returns `postgresql:
+{extensions: [{name, description, trusted}], extensionsError?}`, the
+extensions users may create, and each managed database its `postgresql:
+{extensions}`. Databases
 the plugin doesn't manage are listed without `id`, and the plugin's own
 per-database group roles aren't listed as users.
 
