@@ -77,6 +77,12 @@ type usersResponse struct {
 	DatabaseError string `json:"databaseError,omitempty"`
 	// CredentialKind tells whether users authenticate with a password or an API key.
 	CredentialKind engine.CredentialKind `json:"credentialKind"`
+	// RolesRequired tells whether users need at least one role; PostgreSQL
+	// users, such as a database's owner, may have none.
+	RolesRequired bool `json:"rolesRequired"`
+	// DatabasesSupported tells whether the instance's databases are managed
+	// too, so database-scoped roles are granted on them.
+	DatabasesSupported bool `json:"databasesSupported"`
 }
 
 type credentialsResponse struct {
@@ -294,6 +300,9 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		CanManage:      a.canManage,
 		CredentialKind: engine.CredentialKindOf(a.engine),
 	}
+	_, noRolesErr := a.engine.NormalizeRoles(nil)
+	resp.RolesRequired = noRolesErr != nil
+	_, resp.DatabasesSupported = a.engine.(engine.DatabaseEngine)
 	managed := map[string]bool{}
 	for i := range declared {
 		resp.Users = append(resp.Users, managedView(a.engine, &declared[i]))
@@ -309,7 +318,7 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		resp.DatabaseError = "the database can't be reached"
 	}
 	for _, u := range dbUsers {
-		if u.Database == a.engine.AuthDatabase() && managed[u.Username] {
+		if u.Hidden || u.Database == a.engine.AuthDatabase() && managed[u.Username] {
 			continue
 		}
 		resp.Users = append(resp.Users, userView{Username: u.Username, Database: u.Database, Roles: u.Roles, System: u.System})

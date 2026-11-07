@@ -10,7 +10,9 @@ Users are declared as Kubernetes resources, `InstanceUser`, and reconciled
 into the instance's database. Create them from the **Users** tab on the
 instance page or with `kubectl`/GitOps; either way the plugin keeps the
 database in sync, stores generated credentials in a Secret applications can
-mount, and drops the user when the resource is deleted.
+mount, and drops the user when the resource is deleted. On PostgreSQL, the
+databases of an instance and their owners are declared the same way, as
+`InstanceDatabase`s, from the **Databases** tab or with `kubectl`/GitOps.
 
 Supported providers:
 
@@ -18,6 +20,7 @@ Supported providers:
 |---|---|
 | `percona-server-mongodb` | Percona Server for MongoDB, through the operator's `spec.users` |
 | `provider-cloudnative-pg` | CloudNativePG 1.30+, through the operator's `DatabaseRole` resource |
+| `provider-percona-postgresql` | Percona Operator for PostgreSQL, through SQL as the operator's `postgres` superuser |
 | `provider-kserve` | API keys for models on the Envoy AI Gateway, through the provider's key Secrets |
 
 ## InstanceUser
@@ -51,15 +54,122 @@ status:
   Editing its `password` rotates the password in the database.
 - `Ready` means the user exists in the database with exactly the declared
   roles. Role changes go back to `Pending` until the database matches.
+  PostgreSQL users may have no roles, such as the owner of an
+  `InstanceDatabase`; other engines require one. On PostgreSQL, `read` and
+  `readWrite` are granted on one InstanceDatabase (see
+  [Per-database roles](#per-database-roles)).
 - Deleting an InstanceUser drops the user from the database (finalizer
   `plugin-user-management.plugins.openeverest.io/drop-user`). InstanceUsers
   are owned by their Instance, so deleting the instance deletes them.
 
 See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
 [examples/instanceuser-postgresql.yaml](examples/instanceuser-postgresql.yaml)
-(CloudNativePG) and
+(CloudNativePG),
+[examples/instanceuser-percona-postgresql.yaml](examples/instanceuser-percona-postgresql.yaml)
+(Percona PostgreSQL) and
 [examples/instanceuser-kserve.yaml](examples/instanceuser-kserve.yaml)
 (an API key for a model).
+
+## InstanceDatabase
+
+Supported for `provider-cloudnative-pg` and `provider-percona-postgresql`.
+Manage them from the instance's **Databases** tab, which lists the managed
+databases with their owner, who can connect and status, next to the
+instance's other databases. There you create a database for an owner (a user
+of the instance; it needs no roles), change its owner or who can connect, and
+delete it, keeping its data or, after typing its name, dropping it. In the
+**Users** tab, `read` and `readWrite` are granted on one of these databases,
+picked from a list.
+
+```yaml
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceDatabase
+metadata:
+  name: orders
+  namespace: team-a          # the instance's namespace
+spec:
+  instanceRef:
+    name: orders-db          # immutable
+  name: orders               # immutable; [a-z_][a-z0-9_]*, at most 63
+  owner:
+    instanceUserRef:
+      name: orders-owner     # an InstanceUser of the same instance
+  deletionPolicy: Retain     # Retain (default) | Delete
+  connect: Public            # Public (default) | Granted
+status:
+  phase: Ready               # Pending | Ready | Failed | Deleting
+  owner: orders_owner
+  available: true            # applied at least once
+  conditions: [{type: Ready, status: "True"}]
+```
+
+- The database is created once the instance is ready and the owner's
+  InstanceUser has been created in it (it may still be `Pending`, e.g.
+  waiting for a role on this very database); until then it's `Pending` with
+  the reason. `status.available` is set once the database and its roles
+  have been applied, and stays set.
+  `Ready` means the database exists with that owner. Changing the owner
+  changes the owner of the database, not of the objects in it.
+- **No takeover**: a database that exists before the plugin claims its name
+  fails, as do PostgreSQL's own databases and those the provider or operator
+  creates. One InstanceDatabase per database name and instance; the oldest
+  wins.
+- Deleting an InstanceDatabase (finalizer
+  `plugin-user-management.plugins.openeverest.io/release-database`) with
+  `Retain` stops managing the database and keeps it, so pruning it from Git
+  never loses data; with `Delete` it drops the database. If PostgreSQL
+  refuses, e.g. while sessions are using the database, the InstanceDatabase
+  stays `Deleting` with the reason (see the engines for how sessions are
+  handled). InstanceDatabases are owned by their Instance.
+- The owner's InstanceUser can't be deleted while it owns a database:
+  PostgreSQL refuses to drop the role and the InstanceUser stays `Deleting`
+  with the reason until the database is dropped or given another owner.
+- Users get access to one database with the `read` and `readWrite` roles on
+  it (see [Per-database roles](#per-database-roles)).
+- `connect` tells who can connect to the database. With `Public`,
+  PostgreSQL's default, every user can, but without a role on it they can't
+  read or change its tables. With `Granted` (`REVOKE CONNECT ... FROM
+  PUBLIC`) only its owner, the users granted `read` or `readWrite` on it and
+  superusers can, besides the operator's roles that connect to every
+  database, which keep `CONNECT` when they exist: PgBouncer's auth user
+  (`_crunchypgbouncer` on Percona, `cnpg_pooler_pgbouncer` on
+  CloudNativePG), CloudNativePG's metrics exporter and the monitoring users.
+  Users with a predefined role such as `pg_read_all_data` can't connect to a
+  `Granted` database without a role on it. Switching back to `Public` grants
+  `CONNECT` to `PUBLIC` again.
+
+### Per-database roles
+
+```yaml
+kind: InstanceUser
+spec:
+  instanceRef: {name: orders-db}
+  username: orders_app
+  roles:
+    - role: readWrite        # or read
+      database: orders       # an InstanceDatabase of the same instance
+```
+
+- `read` reads the database's tables, views and sequences; `readWrite` also
+  inserts, updates and deletes rows and uses sequences. Neither can create,
+  alter or drop objects: that's the owner's.
+- They cover the objects that exist and those the **owner creates later**
+  (default privileges), in every schema the owner creates. Migrations should
+  run as the owner, or `SET ROLE` to it; objects created by other users aren't
+  covered.
+- Each InstanceDatabase gets two group roles, `oe_<database>_read` and
+  `oe_<database>_readwrite` (hashed when longer than 63 characters), holding
+  those privileges; granting a role makes the user a member, so revoking it
+  takes effect right away. They're listed as system users, and usernames
+  can't start with `oe_`.
+- A user granted a role on a database whose InstanceDatabase hasn't been
+  applied yet (`status.available`) is declared with its other roles and
+  stays `Pending` until it has. Once available, the roles stay granted even
+  while the InstanceDatabase is briefly `Pending`, e.g. during an owner
+  change. Deleting the InstanceDatabase revokes them; dropping the database
+  drops its group roles.
+
+See [examples/instancedatabase.yaml](examples/instancedatabase.yaml).
 
 ## How it works
 
@@ -135,16 +245,81 @@ what it depends on (the operator's resources, Secrets).
   in the Cluster's `spec.managed.roles` are listed as system users. Roles
   declared by other `DatabaseRole`s are listed too, even before they exist, so
   the plugin never declares the same role.
-- Grantable roles are PostgreSQL's predefined roles, which apply to all
-  databases: `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`.
-  CloudNativePG declares memberships but not object privileges, so there are
-  no per-database roles yet. Usernames are at most 63 characters and can't be
-  `postgres`, `streaming_replica` or start with `pg_` or `cnpg_`.
+- Grantable roles are `read` and `readWrite` on one InstanceDatabase, and
+  PostgreSQL's predefined roles, which apply to all databases:
+  `pg_read_all_data`, `pg_write_all_data` and `pg_monitor`. Usernames are at
+  most 63 characters and can't be `postgres`, `streaming_replica` or start
+  with `pg_`, `cnpg_` or `oe_`.
+- An InstanceDatabase's group roles are `DatabaseRole`s like users', without
+  login. CloudNativePG declares memberships but not object privileges, so the
+  plugin grants the group roles theirs itself, connected to the database **as
+  its owner** with the owner's password: no superuser access is needed. It
+  grants on the objects the owner owns that lack a privilege, and sets the
+  owner's default privileges.
 - The connection string points at the read-write service and the
   application database, with `sslmode=require`.
 - The operator applies a `DatabaseRole` when it or its Secret changes; it
   doesn't revert changes made to the role in SQL. Such drift shows up as
   `Pending` until the user's roles or password change again.
+- Each InstanceDatabase is a CloudNativePG `Database` named
+  `<instance>-<database>-<hash>`, owned by the `Cluster`, labeled with the
+  instance, with the `retain` reclaim policy. Releasing it deletes the
+  `Database`; dropping it switches the policy to `delete` first, and the
+  operator runs `DROP DATABASE`, which waits for every session on the
+  database to close. CloudNativePG's error for a `Database` is
+  shown on the InstanceDatabase.
+- The application database (`spec.bootstrap.initdb.database`) and databases
+  that other `Database` resources declare, such as the provider's own for
+  extensions, are reserved.
+
+### Percona PostgreSQL engine
+
+The operator's `spec.users` can't grant role memberships (it applies
+`options` with `ALTER ROLE`), only takes passwords from Secrets it writes
+itself, and never drops users. So the plugin manages users in SQL and leaves
+`spec.users` to the provider:
+
+- Connects to the primary (`<cluster>-primary`) as the operator's `postgres`
+  superuser (`<cluster>-pguser-postgres`, which the provider always declares),
+  over TLS verified against the CA in `<cluster>-cluster-cert` (or
+  `spec.secrets.customTLSSecret`).
+- Each user is a login role with no other attributes (`NOSUPERUSER`,
+  `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`), a member of
+  exactly the granted roles, and commented `Managed by OpenEverest`. Every
+  reconcile restores the attributes, grants missing memberships and revokes
+  others, so changes made in SQL are reverted.
+- Passwords are read from the user's Secret, under any key, and sent as
+  SCRAM-SHA-256 verifiers, never in plain text. A role's password is only
+  changed when its stored verifier doesn't match the Secret.
+- The plugin only ever alters or drops roles carrying its comment, whatever
+  the InstanceUser says. Deleting a user runs `DROP ROLE`; if the role still
+  owns objects or holds privileges, PostgreSQL refuses and its error is shown
+  while the InstanceUser stays `Deleting`, until they're reassigned or dropped.
+- `postgres`, `monitor`, `ccp_monitoring`, `everest-monitor`, `_crunchy*` and
+  the users in the `PerconaPGCluster`'s `spec.users` are listed as system users,
+  even before they exist, and can't be declared: the operator would take them
+  over.
+- Grantable roles are the same as for CloudNativePG: `read` and `readWrite`
+  on one InstanceDatabase, `pg_read_all_data`, `pg_write_all_data` and
+  `pg_monitor`. Usernames are at most 63 characters and can't start with
+  `pg_` or `oe_`.
+- An InstanceDatabase's group roles are created with `CREATE ROLE ... NOLOGIN`
+  and the plugin's comment, and get their privileges from the superuser, on
+  every object that lacks one, with the owner's default privileges.
+- The connection string points at PgBouncer (`<cluster>-pgbouncer`) when it
+  runs, like the Instance's own connection details, or else at the primary,
+  with the `postgres` database and `sslmode=require`.
+- Until the `PerconaPGCluster` is `ready`, users stay `Pending`.
+- InstanceDatabases are created with `CREATE DATABASE ... OWNER` and
+  commented `Managed by OpenEverest`; owner changes run `ALTER DATABASE ...
+  OWNER TO`. Releasing removes the comment. Dropping first closes the
+  database's idle sessions, such as PgBouncer's pooled server connections,
+  which would otherwise block it for up to PgBouncer's `server_idle_timeout`
+  after applications disconnect, then runs `DROP DATABASE` without `FORCE`:
+  sessions running a query or a transaction keep the InstanceDatabase
+  `Deleting` until they end. Only databases with the comment are ever dropped. The databases listed in
+  `spec.users[].databases`, which the operator creates owned by `postgres`,
+  are reserved.
 
 ### KServe engine (API keys for models)
 
@@ -209,7 +384,9 @@ applied yet. Engines whose users authenticate with API keys implement
 `APIKeyEngine` to generate and validate them (the UI then says "API key"), and
 engines whose clients need more than a URI implement
 `ConnectionPropertiesProvider` to add keys, such as `model`, to the
-credentials Secret.
+credentials Secret. Engines that manage databases implement
+`DatabaseEngine` for InstanceDatabases; others report that databases aren't
+supported.
 
 Engines are keyed by provider name (Instance `spec.providerRef.name`) in
 [backend/main.go](backend/main.go). Prefer declaring users through the
@@ -257,11 +434,12 @@ helm install plugin-user-management charts/plugin-user-management \
   --namespace everest-system
 ```
 
-Helm installs the InstanceUser CRD from `crds/` but never upgrades or deletes
-it. On upgrades apply it first:
+Helm installs the CRDs (InstanceUser, InstanceDatabase) from `crds/` but
+never upgrades or deletes them. On upgrades apply them first; Helm owns
+their fields, so take them over:
 
 ```bash
-kubectl apply --server-side -f charts/plugin-user-management/crds
+kubectl apply --server-side --force-conflicts -f charts/plugin-user-management/crds
 ```
 
 ### Upgrading from 0.1.x
@@ -300,13 +478,16 @@ done
 
 | Value | Default | Description |
 |---|---|---|
-| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-kserve]` | Providers that get the Users tab |
+| `plugin.extensionPoints[0].providers` | `[percona-server-mongodb, provider-cloudnative-pg, provider-percona-postgresql, provider-kserve]` | Providers that get the Users tab |
+| `plugin.extensionPoints[1].providers` | `[provider-cloudnative-pg, provider-percona-postgresql]` | Providers that get the Databases tab |
 | `everestAPIURL` | discovered | Everest API the backend authorizes against |
 
-The chart's ClusterRole lets the backend manage InstanceUsers and Secrets,
-read Instances, get/patch `perconaservermongodbs`, manage CloudNativePG
-`databaseroles` and get `clusters` in every namespace (database namespaces
-are created dynamically). It caches only Secrets labeled
+The chart's ClusterRole lets the backend manage InstanceUsers,
+InstanceDatabases and Secrets, read Instances, get/patch
+`perconaservermongodbs`, manage CloudNativePG `databaseroles` and
+`databases`, and get CloudNativePG `clusters` and `perconapgclusters` in
+every namespace (database namespaces are created dynamically). It caches
+only Secrets labeled
 `plugin-user-management.plugins.openeverest.io/instance`; the operator's
 Secrets are read one by one when needed, and a model's API key Secrets are
 listed by label in its namespace.
@@ -319,22 +500,34 @@ InstanceUsers, not DatabaseRoles.
 
 Served under `/v1/clusters/{cluster}/plugins/plugin-user-management` by
 everest-server. Every endpoint takes `?namespace=&instance=`; `{id}` is the
-InstanceUser's name.
+InstanceUser's, or InstanceDatabase's, name. Databases take the same
+permissions as users.
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind}` |
+| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind, rolesRequired, databasesSupported}` |
 | `POST /api/users` | `{username, password?, roles}` | `201` credentials |
 | `PUT /api/users/{id}/roles` | `{roles}` | `204`; the roles replace the user's roles |
 | `GET /api/users/{id}/credentials` | | credentials |
 | `POST /api/users/{id}/password` | `{password?}` | credentials |
 | `DELETE /api/users/{id}` | | `204` |
+| `GET /api/databases` | | `{databases, supported, canManage, databaseError?}` |
+| `POST /api/databases` | `{name, ownerId, connect?}` | `201` database |
+| `PUT /api/databases/{id}` | `{ownerId, connect?}` | `204` |
+| `DELETE /api/databases/{id}` | | `204`; with `&drop=true` the database is dropped, otherwise kept |
 
 Credentials are `{id, username, password, uri?, secret, properties?}`;
 `properties` holds further connection details such as `model`. `roles` are
 `[{role, database?}]`; `database` is only set for database-scoped roles. An
 empty `password` is generated (24 letters and digits). When `credentialKind`
 is `apiKey`, the password must be empty and an `oe_sk_` API key is generated.
+`rolesRequired` is false when users may have no roles (PostgreSQL), and
+`databasesSupported` true when database-scoped roles are granted on the
+instance's managed databases. Databases are `{id?, name, owner?, ownerId?,
+connect?, deletionPolicy?, managed, system, phase?, message?}`; `ownerId` is
+the owner's InstanceUser and `connect` is `Public` or `Granted`. Databases
+the plugin doesn't manage are listed without `id`, and the plugin's own
+per-database group roles aren't listed as users.
 
 ## Development
 
@@ -353,12 +546,16 @@ current kubeconfig context:
 
 ```bash
 make dev-registry     # throwaway in-cluster registry (dev/registry.yaml)
-make dev-deploy       # build, push to it, apply the CRD, helm upgrade --install
+make dev-deploy       # build, push to it, apply the CRDs, helm upgrade --install
 kubectl create namespace um-test && kubectl apply -f dev/demo-instance.yaml
 kubectl apply -f examples/instanceuser.yaml
 # CloudNativePG, with provider-cloudnative-pg installed:
 kubectl apply -f dev/demo-instance-postgresql.yaml
 kubectl apply -f examples/instanceuser-postgresql.yaml
+kubectl apply -f examples/instancedatabase.yaml
+# Percona PostgreSQL, with provider-percona-postgresql installed:
+kubectl apply -f dev/demo-instance-percona-postgresql.yaml
+kubectl apply -f examples/instanceuser-percona-postgresql.yaml
 # API keys, with a provider-kserve model exposed through the AI Gateway:
 kubectl apply -f examples/instanceuser-kserve.yaml
 ```
@@ -380,10 +577,9 @@ GitHub release with notes.
 
 ## Roadmap
 
-- Engines for MySQL (`percona-xtradb-cluster`) and Percona PostgreSQL
-  (`provider-percona-postgresql`), through their operators' user APIs.
-- Per-database PostgreSQL roles (read-only and read-write on one database),
-  which need privileges CloudNativePG doesn't declare.
+- An engine for MySQL (`percona-xtradb-cluster`), through its operator's
+  user API.
+- InstanceDatabases for other engines.
 - Custom roles (MongoDB `spec.roles`) as a resource of their own.
 - Adopting existing database users into an InstanceUser.
 - Configurable role catalog per installation.

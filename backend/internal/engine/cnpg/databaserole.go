@@ -15,15 +15,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 var databaseRoleResource = schema.GroupVersionResource{Group: "postgresql.cnpg.io", Version: "v1", Resource: "databaseroles"}
 
 const (
-	// FieldManager owns the DatabaseRoles the plugin declares.
+	// FieldManager owns the DatabaseRoles and Databases the plugin declares.
 	FieldManager = "plugin-user-management"
-	// instanceLabel marks the DatabaseRoles the plugin declares, with the
-	// instance they belong to, like the InstanceUsers they come from.
+	// instanceLabel marks the DatabaseRoles and Databases the plugin
+	// declares, with the instance they belong to, like the InstanceUsers and
+	// InstanceDatabases they come from.
 	instanceLabel = "plugin-user-management.plugins.openeverest.io/instance"
 	// reloadLabel makes CloudNativePG apply password Secret changes right away.
 	reloadLabel = "cnpg.io/reload"
@@ -53,8 +55,8 @@ func databaseRoleName(instance, username string) string {
 // DatabaseRole so it doesn't outlive it.
 func databaseRoleApplyConfiguration(c cluster, user engine.DesiredUser) *unstructured.Unstructured {
 	inRoles := make([]any, 0, len(user.Roles))
-	for _, g := range user.Roles {
-		inRoles = append(inRoles, g.Role)
+	for _, r := range pgaccess.MemberOf(user.Roles) {
+		inRoles = append(inRoles, r)
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": databaseRoleResource.GroupVersion().String(),
@@ -82,11 +84,16 @@ func databaseRoleApplyConfiguration(c cluster, user engine.DesiredUser) *unstruc
 	}}
 }
 
-func (e *Engine) applyDatabaseRole(ctx context.Context, obj *unstructured.Unstructured) error {
-	_, err := e.dyn.Resource(databaseRoleResource).Namespace(obj.GetNamespace()).
+// applyObject server-side applies a DatabaseRole or Database the plugin declares.
+func (e *Engine) applyObject(ctx context.Context, obj *unstructured.Unstructured) error {
+	gvr := databaseRoleResource
+	if obj.GetKind() == "Database" {
+		gvr = databaseResource
+	}
+	_, err := e.dyn.Resource(gvr).Namespace(obj.GetNamespace()).
 		Apply(ctx, obj.GetName(), obj, metav1.ApplyOptions{FieldManager: FieldManager, Force: true})
 	if err != nil {
-		return fmt.Errorf("apply DatabaseRole: %w", err)
+		return fmt.Errorf("apply %s: %w", obj.GetKind(), err)
 	}
 	return nil
 }
@@ -117,31 +124,46 @@ func (e *Engine) ensureReloadLabel(ctx context.Context, namespace, name string) 
 // DatabaseRole with the delete reclaim policy, and reports ErrInProgress until
 // the DatabaseRole is gone.
 func (e *Engine) dropDatabaseRole(ctx context.Context, target engine.Target, username string) error {
-	roles := e.dyn.Resource(databaseRoleResource).Namespace(target.Namespace)
-	name := databaseRoleName(target.Instance, username)
-	role, err := roles.Get(ctx, name, metav1.GetOptions{})
+	return e.releaseObject(ctx, databaseRoleResource, target.Namespace, databaseRoleName(target.Instance, username),
+		"databaseRoleReclaimPolicy", true, "role")
+}
+
+// releaseObject deletes a DatabaseRole or Database, after switching its
+// reclaim policy (policyField) to delete when drop is set so CloudNativePG
+// drops what it declares, and reports ErrInProgress until it's gone.
+func (e *Engine) releaseObject(ctx context.Context, gvr schema.GroupVersionResource, namespace, name, policyField string, drop bool, what string) error {
+	objects := e.dyn.Resource(gvr).Namespace(namespace)
+	obj, err := objects.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("get DatabaseRole: %w", err)
+		return fmt.Errorf("get %s %q: %w", gvr.Resource, name, err)
 	}
-	if role.GetDeletionTimestamp() == nil {
-		if policy, _, _ := unstructured.NestedString(role.Object, "spec", "databaseRoleReclaimPolicy"); policy != reclaimDelete {
-			patch := fmt.Appendf(nil, `{"spec":{"databaseRoleReclaimPolicy":%q}}`, reclaimDelete)
-			if _, err := roles.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{FieldManager: FieldManager}); err != nil {
-				return fmt.Errorf("set DatabaseRole reclaim policy: %w", err)
+	verb := "releasing"
+	if drop {
+		verb = "dropping"
+	}
+	if obj.GetDeletionTimestamp() == nil {
+		policy := reclaimRetain
+		if drop {
+			policy = reclaimDelete
+		}
+		if current, _, _ := unstructured.NestedString(obj.Object, "spec", policyField); current != policy {
+			patch := fmt.Appendf(nil, `{"spec":{%q:%q}}`, policyField, policy)
+			if _, err := objects.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{FieldManager: FieldManager}); err != nil {
+				return fmt.Errorf("set %s reclaim policy: %w", obj.GetKind(), err)
 			}
 		}
-		if err := roles.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete DatabaseRole: %w", err)
+		if err := objects.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete %s: %w", obj.GetKind(), err)
 		}
-		return fmt.Errorf("%w: CloudNativePG is dropping the role", engine.ErrInProgress)
+		return fmt.Errorf("%w: CloudNativePG is %s the %s", engine.ErrInProgress, verb, what)
 	}
-	if reason := failureReason(role); reason != "" {
-		return fmt.Errorf("%w: CloudNativePG can't drop the role: %s", engine.ErrInProgress, reason)
+	if reason := failureReason(obj); reason != "" {
+		return fmt.Errorf("%w: CloudNativePG can't drop the %s: %s", engine.ErrInProgress, what, reason)
 	}
-	return fmt.Errorf("%w: CloudNativePG is dropping the role", engine.ErrInProgress)
+	return fmt.Errorf("%w: CloudNativePG is %s the %s", engine.ErrInProgress, verb, what)
 }
 
 // failureReason is CloudNativePG's error from the last attempt to apply the

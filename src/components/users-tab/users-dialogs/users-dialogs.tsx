@@ -17,6 +17,9 @@ import { StoredCredentialsDialog } from './stored-credentials-dialog/stored-cred
 interface UsersDialogsProps {
   target: InstanceTarget;
   roles: Role[];
+  rolesRequired?: boolean;
+  // The databases database-scoped roles can be granted on, when managed.
+  databases?: string[];
   dialog: UsersDialogState;
   onClose: () => void;
 }
@@ -26,7 +29,14 @@ interface ShownCredentials {
   credentials: Credentials;
 }
 
-export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsProps) => {
+export const UsersDialogs = ({
+  target,
+  roles,
+  rolesRequired,
+  databases,
+  dialog,
+  onClose,
+}: UsersDialogsProps) => {
   const [shown, setShown] = useState<ShownCredentials | null>(null);
   const terms = useTerms();
   const createUser = useCreateUser(target);
@@ -55,6 +65,8 @@ export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsPro
         <UserFormDialog
           mode="create"
           roles={roles}
+          rolesRequired={rolesRequired}
+          databases={databases}
           isSubmitting={createUser.isPending}
           error={createUser.error?.message}
           onClose={close}
@@ -73,6 +85,8 @@ export const UsersDialogs = ({ target, roles, dialog, onClose }: UsersDialogsPro
         <UserFormDialog
           mode="editRoles"
           roles={roles}
+          rolesRequired={rolesRequired}
+          databases={databases}
           username={dialog.user.username}
           initialRoles={dialog.user.roles}
           isSubmitting={updateRoles.isPending}

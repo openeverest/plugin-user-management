@@ -13,6 +13,9 @@ interface RoleGrantRowProps {
   canRemove: boolean;
   // False when no role of the engine is granted on a database.
   showDatabase: boolean;
+  // The databases roles can be granted on, when the instance's databases are
+  // managed; the database is typed in otherwise.
+  databases?: string[];
   onChange: (value: RoleGrantDraft) => void;
   onRemove: () => void;
 }
@@ -24,10 +27,16 @@ export const RoleGrantRow = ({
   showErrors,
   canRemove,
   showDatabase,
+  databases,
   onChange,
   onRemove,
 }: RoleGrantRowProps) => {
   const isClusterScoped = findRole(roles, value.role)?.scope === 'cluster';
+  // Keeps a granted database that's no longer offered, e.g. while it's deleted.
+  const databaseOptions =
+    databases && value.database && !databases.includes(value.database)
+      ? [...databases, value.database]
+      : databases;
   return (
     <Stack direction="row" sx={{ gap: 1, alignItems: 'flex-start' }}>
       <TextField
@@ -47,7 +56,28 @@ export const RoleGrantRow = ({
           </MenuItem>
         ))}
       </TextField>
-      {showDatabase && (
+      {showDatabase && databaseOptions && !isClusterScoped && (
+        <TextField
+          select
+          size="small"
+          label={Messages.database}
+          value={value.database}
+          onChange={(e) => onChange({ ...value, database: e.target.value })}
+          error={showErrors && !!errors.database}
+          helperText={
+            (showErrors && errors.database && (databaseOptions.length ? Messages.databaseChoose : Messages.noDatabases)) ||
+            (databaseOptions.length ? undefined : Messages.noDatabases)
+          }
+          sx={{ flex: 1 }}
+        >
+          {databaseOptions.map((name) => (
+            <MenuItem key={name} value={name}>
+              {name}
+            </MenuItem>
+          ))}
+        </TextField>
+      )}
+      {showDatabase && (!databaseOptions || isClusterScoped) && (
         <TextField
           size="small"
           label={Messages.database}

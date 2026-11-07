@@ -37,6 +37,7 @@ import (
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/cnpg"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/kserve"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/mongodb"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/perconapg"
 )
 
 // dist/main.js is copied from the frontend build during the Docker build.
@@ -100,6 +101,10 @@ func newMux(s *server) *http.ServeMux {
 	mux.HandleFunc("GET /api/users/{id}/credentials", s.handleGetCredentials)
 	mux.HandleFunc("POST /api/users/{id}/password", s.handleResetPassword)
 	mux.HandleFunc("DELETE /api/users/{id}", s.handleDeleteUser)
+	mux.HandleFunc("GET /api/databases", s.handleListDatabases)
+	mux.HandleFunc("POST /api/databases", s.handleCreateDatabase)
+	mux.HandleFunc("PUT /api/databases/{id}", s.handleUpdateDatabase)
+	mux.HandleFunc("DELETE /api/databases/{id}", s.handleDeleteDatabase)
 	return mux
 }
 
@@ -167,9 +172,10 @@ func main() {
 		log.Fatalf("kubernetes dynamic client: %v", err)
 	}
 	engines := map[string]engine.Engine{
-		mongodb.ProviderName: mongodb.New(kube, dyn),
-		cnpg.ProviderName:    cnpg.New(kube, dyn),
-		kserve.ProviderName:  kserve.New(kube, dyn),
+		mongodb.ProviderName:   mongodb.New(kube, dyn),
+		cnpg.ProviderName:      cnpg.New(kube, dyn),
+		perconapg.ProviderName: perconapg.New(kube, dyn),
+		kserve.ProviderName:    kserve.New(kube, dyn),
 	}
 
 	mgr, err := newManager(cfg)
@@ -181,8 +187,14 @@ func main() {
 	if err := controller.IndexInstance(ctx, mgr); err != nil {
 		log.Fatalf("index InstanceUsers: %v", err)
 	}
+	if err := controller.IndexDatabaseInstance(ctx, mgr); err != nil {
+		log.Fatalf("index InstanceDatabases: %v", err)
+	}
 	if err := (&controller.Reconciler{Client: mgr.GetClient(), Engines: engines}).SetupWithManager(mgr); err != nil {
 		log.Fatalf("set up controller: %v", err)
+	}
+	if err := (&controller.DatabaseReconciler{Client: mgr.GetClient(), Engines: engines}).SetupWithManager(mgr); err != nil {
+		log.Fatalf("set up database controller: %v", err)
 	}
 
 	s := &server{

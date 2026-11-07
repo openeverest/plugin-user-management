@@ -16,4 +16,7 @@ export const Messages = {
   rolesRequired: 'Grant at least one role.',
   roleRequired: 'Select a role.',
   databaseRequired: 'Enter a database.',
+  databaseChoose: 'Choose a database.',
+  noDatabases: 'No databases yet: create one in the Databases tab.',
+  noRoles: 'No roles: the user can log in but not use any data, e.g. the owner of a database.',
 };

@@ -2,22 +2,26 @@ package cnpg
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
-// The roles the plugin grants: PostgreSQL predefined roles, which apply to
-// every database of the instance. CloudNativePG declares role memberships
-// but not object privileges, so there are no per-database roles. Deliberately
-// excludes superuser, createrole, replication, bypassrls and the predefined
-// roles that reach the server's files or programs: those would let anyone who
-// can use the plugin mint a superuser.
-var roleCatalog = []engine.Role{
-	{Name: "pg_read_all_data", Scope: engine.ScopeCluster, Description: "Read all tables, views and sequences in all databases."},
-	{Name: "pg_write_all_data", Scope: engine.ScopeCluster, Description: "Insert, update and delete rows in all tables in all databases; add pg_read_all_data to read them."},
-	{Name: "pg_monitor", Scope: engine.ScopeCluster, Description: "Read monitoring views and statistics."},
-}
+// The roles the plugin grants: read and readWrite on one InstanceDatabase,
+// through group roles the plugin declares for it, and PostgreSQL predefined
+// roles, which apply to every database of the instance. CloudNativePG
+// declares memberships but not privileges, so the plugin grants the group
+// roles' privileges itself, as the database's owner. Deliberately excludes
+// superuser, createrole, replication, bypassrls and the predefined roles that
+// reach the server's files or programs: those would let anyone who can use
+// the plugin mint a superuser.
+var roleCatalog = append(slices.Clone(pgaccess.Roles),
+	engine.Role{Name: "pg_read_all_data", Scope: engine.ScopeCluster, Description: "Read all tables, views and sequences in all databases."},
+	engine.Role{Name: "pg_write_all_data", Scope: engine.ScopeCluster, Description: "Insert, update and delete rows in all tables in all databases; add pg_read_all_data to read them."},
+	engine.Role{Name: "pg_monitor", Scope: engine.ScopeCluster, Description: "Read monitoring views and statistics."},
+)
 
 const (
 	// PostgreSQL silently truncates longer identifiers (NAMEDATALEN - 1).
@@ -29,7 +33,7 @@ const (
 // CloudNativePG refuses DatabaseRoles for these.
 var (
 	reservedUsernames        = map[string]bool{"postgres": true, "streaming_replica": true}
-	reservedUsernamePrefixes = []string{"pg_", "cnpg_"}
+	reservedUsernamePrefixes = []string{"pg_", "cnpg_", pgaccess.GroupPrefix}
 )
 
 func isCatalogRole(name string) bool {
@@ -41,21 +45,26 @@ func isCatalogRole(name string) bool {
 	return false
 }
 
-// normalizeRoles validates grants and returns them without databases, as
-// predefined roles apply to all databases.
+// normalizeRoles validates grants. Database-scoped roles keep their
+// database; predefined roles apply to all databases and lose theirs. A user
+// may have no roles, e.g. the owner of a database.
 func normalizeRoles(grants []engine.RoleGrant) ([]engine.RoleGrant, error) {
-	if len(grants) == 0 {
-		return nil, fmt.Errorf("%w: at least one role is required", engine.ErrInvalid)
-	}
-	seen := map[string]bool{}
+	seen := map[engine.RoleGrant]bool{}
 	normalized := make([]engine.RoleGrant, 0, len(grants))
 	for _, g := range grants {
 		if !isCatalogRole(g.Role) {
 			return nil, fmt.Errorf("%w: role %q can't be granted", engine.ErrInvalid, g.Role)
 		}
-		if !seen[g.Role] {
-			seen[g.Role] = true
-			normalized = append(normalized, engine.RoleGrant{Role: g.Role})
+		grant := engine.RoleGrant{Role: g.Role}
+		if pgaccess.IsDatabaseRole(g.Role) {
+			var err error
+			if grant, err = pgaccess.NormalizeGrant(g); err != nil {
+				return nil, err
+			}
+		}
+		if !seen[grant] {
+			seen[grant] = true
+			normalized = append(normalized, grant)
 		}
 	}
 	return normalized, nil

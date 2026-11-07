@@ -1,0 +1,49 @@
+# An orders database on the pg-users CloudNativePG instance, owned by the
+# user the orders service runs its migrations as. For a Percona PostgreSQL
+# instance, point both instanceRefs at it (e.g. ppg-users).
+#
+# The owner needs no roles: owning the database lets it create and change
+# the objects in it. The database is created once the owner is Ready.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceUser
+metadata:
+  name: orders-owner
+  namespace: um-test
+spec:
+  instanceRef:
+    name: pg-users
+  username: orders_owner
+---
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceDatabase
+metadata:
+  name: orders
+  namespace: um-test
+spec:
+  instanceRef:
+    name: pg-users
+  name: orders
+  owner:
+    instanceUserRef:
+      name: orders-owner
+  # Retain (default) keeps the database and its data when this resource is
+  # deleted; Delete drops it.
+  deletionPolicy: Retain
+  # Granted lets only the owner and users granted a role on it connect;
+  # Public (default) lets every user connect.
+  connect: Granted
+---
+# The orders service reads and writes the orders database, including the
+# tables orders-owner creates later, and nothing else.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceUser
+metadata:
+  name: orders-app
+  namespace: um-test
+spec:
+  instanceRef:
+    name: pg-users
+  username: orders_app
+  roles:
+    - role: readWrite        # or read
+      database: orders

@@ -1,0 +1,22 @@
+# A database user for the reporting service on the ppg-users Percona
+# PostgreSQL instance. The plugin generates its password into the Secret
+# ppg-reporting-service-credentials (keys: username, password, uri), which the
+# application can mount. The uri connects through PgBouncer when it runs.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceUser
+metadata:
+  name: ppg-reporting-service
+  namespace: um-test
+spec:
+  instanceRef:
+    name: ppg-users
+  username: reporting_svc
+  # PostgreSQL predefined roles; they apply to all databases.
+  roles:
+    - role: pg_read_all_data
+    - role: pg_monitor
+  # To bring your own password instead, point at any key of a Secret in the
+  # instance's namespace:
+  # passwordSecretRef:
+  #   name: reporting-svc-password
+  #   key: password

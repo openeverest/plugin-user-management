@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
 )
 
 var target = engine.Target{Namespace: "ns", Instance: "pg"}
@@ -54,12 +56,39 @@ func databaseRole(name string, labels map[string]any, spec, status map[string]an
 }
 
 type fakeSession struct {
-	dbRoles []dbRole
-	closed  bool
+	dbRoles  []dbRole
+	dbs      []dbDatabase
+	objects  []pgaccess.Object
+	existing []string
+	executed [][]string
+	execErr  error
+	// dialedAs records database/user of the connections made as a user.
+	dialedAs []string
+	closed   bool
 }
 
-func (f *fakeSession) roles(context.Context) ([]dbRole, error) { return f.dbRoles, nil }
-func (f *fakeSession) close(context.Context)                   { f.closed = true }
+func (f *fakeSession) roles(context.Context) ([]dbRole, error)         { return f.dbRoles, nil }
+func (f *fakeSession) databases(context.Context) ([]dbDatabase, error) { return f.dbs, nil }
+func (f *fakeSession) existingRoles(_ context.Context, names []string) ([]string, error) {
+	var found []string
+	for _, n := range names {
+		if slices.Contains(f.existing, n) {
+			found = append(found, n)
+		}
+	}
+	return found, nil
+}
+func (f *fakeSession) close(context.Context) { f.closed = true }
+func (f *fakeSession) grantTargets(context.Context, string, string) ([]string, []pgaccess.Object, error) {
+	return nil, f.objects, nil
+}
+func (f *fakeSession) exec(_ context.Context, stmts []string) error {
+	if f.execErr != nil {
+		return f.execErr
+	}
+	f.executed = append(f.executed, stmts)
+	return nil
+}
 
 type testEngine struct {
 	*Engine
@@ -70,12 +99,17 @@ func newTestEngine(s *fakeSession, objects []runtime.Object, secrets ...runtime.
 	gvrs := map[schema.GroupVersionResource]string{
 		clusterResource:      "ClusterList",
 		databaseRoleResource: "DatabaseRoleList",
+		databaseResource:     "DatabaseList",
 	}
 	te := &testEngine{}
 	te.Engine = &Engine{
 		kube: kubefake.NewClientset(secrets...),
 		dyn:  dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrs, objects...),
 		dial: func(context.Context, cluster) (session, error) { return s, nil },
+		dialAs: func(_ context.Context, _ cluster, database, user, password string) (session, error) {
+			s.dialedAs = append(s.dialedAs, database+"/"+user+"/"+password)
+			return s, nil
+		},
 		apply: func(_ context.Context, obj *unstructured.Unstructured) error {
 			te.applied = append(te.applied, obj)
 			return nil
@@ -97,9 +131,11 @@ func TestNormalizeRoles(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized = %+v, want %+v", got, want)
 	}
+	if got, err := normalizeRoles(nil); err != nil || len(got) != 0 {
+		t.Fatalf("no roles: %v, %v", got, err)
+	}
 
 	for name, grants := range map[string][]engine.RoleGrant{
-		"none":             nil,
 		"ungrantable role": {{Role: "pg_execute_server_program"}},
 		"superuser":        {{Role: "postgres"}},
 	} {

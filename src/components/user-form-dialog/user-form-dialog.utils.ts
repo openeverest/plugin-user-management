@@ -35,7 +35,8 @@ const isDatabaseScoped = (roles: Role[], name: string) =>
 export const validateUserForm = (
   values: UserFormValues,
   roles: Role[],
-  mode: UserFormMode
+  mode: UserFormMode,
+  rolesRequired = true
 ): UserFormErrors => {
   const errors: UserFormErrors = { roleRows: [] };
   if (mode === 'create') {
@@ -47,7 +48,7 @@ export const validateUserForm = (
       errors.password = Messages.passwordLength(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH);
     }
   }
-  if (values.roles.length === 0) {
+  if (rolesRequired && values.roles.length === 0) {
     errors.roles = Messages.rolesRequired;
   }
   errors.roleRows = values.roles.map(({ role, database }) => ({

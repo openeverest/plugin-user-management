@@ -99,6 +99,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 				return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: u.Namespace, Name: u.Spec.InstanceRef.Name}}}
 			})).
+		// Users granted access to a database wait for its InstanceDatabase.
+		Watches(&v1alpha1.InstanceDatabase{}, handler.EnqueueRequestsFromMapFunc(
+			func(_ context.Context, obj client.Object) []reconcile.Request {
+				db, ok := obj.(*v1alpha1.InstanceDatabase)
+				if !ok {
+					return nil
+				}
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: db.Namespace, Name: db.Spec.InstanceRef.Name}}}
+			})).
 		// A password edited in a credentials Secret needs its connection string refreshed.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(
 			func(_ context.Context, obj client.Object) []reconcile.Request {
@@ -113,12 +122,16 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // userState is the outcome of reconciling one InstanceUser.
 type userState struct {
-	user     *v1alpha1.InstanceUser
-	roles    []engine.RoleGrant
-	password engine.SecretKeyRef
-	phase    string
-	message  string
-	declared bool
+	user  *v1alpha1.InstanceUser
+	roles []engine.RoleGrant
+	// declarable are the roles that can be declared now, when some wait for
+	// their database; the user is Pending with waiting until all can be.
+	declarable []engine.RoleGrant
+	waiting    string
+	password   engine.SecretKeyRef
+	phase      string
+	message    string
+	declared   bool
 }
 
 func (s *userState) fail(message string) {
@@ -178,7 +191,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	states := make([]*userState, 0, len(live))
 	usernames := map[string]bool{}
 	for _, u := range live {
-		if err := r.ensureMetadata(ctx, u, instance); err != nil {
+		if err := ensureInstanceMetadata(ctx, r.Client, u, instance, Finalizer); err != nil {
 			return ctrl.Result{}, err
 		}
 		s := &userState{user: u, declared: u.Status.Declared, password: PasswordRef(u)}
@@ -204,6 +217,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				return ctrl.Result{}, err
 			}
 		}
+		declarable, waiting, err := r.declarableRoles(ctx, eng, req, roles)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if waiting != "" {
+			s.declarable = declarable
+			s.waiting = fmt.Sprintf("waiting for the InstanceDatabase of database %q", waiting)
+		}
 	}
 
 	result, err := r.syncDatabase(ctx, eng, target, states, deleting)
@@ -219,6 +240,45 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 	return result, nil
+}
+
+// declarableRoles leaves out the roles granted on databases whose
+// InstanceDatabase isn't available, for engines that manage databases:
+// their database-scoped roles only exist once an InstanceDatabase has been
+// applied, and until it's deleted. It returns the first such database, or ""
+// when all roles can be declared. Declaring the rest right away applies
+// revocations without waiting.
+func (r *Reconciler) declarableRoles(ctx context.Context, eng engine.Engine, instance ctrl.Request, roles []engine.RoleGrant) ([]engine.RoleGrant, string, error) {
+	if _, ok := eng.(engine.DatabaseEngine); !ok {
+		return roles, "", nil
+	}
+	var ready map[string]bool
+	declarable := make([]engine.RoleGrant, 0, len(roles))
+	waiting := ""
+	for _, g := range roles {
+		if g.Database == "" {
+			declarable = append(declarable, g)
+			continue
+		}
+		if ready == nil {
+			var list v1alpha1.InstanceDatabaseList
+			if err := r.Client.List(ctx, &list, client.InNamespace(instance.Namespace), client.MatchingFields{InstanceIndex: instance.Name}); err != nil {
+				return nil, "", err
+			}
+			ready = map[string]bool{}
+			for _, db := range list.Items {
+				if db.DeletionTimestamp.IsZero() && db.Status.Available {
+					ready[db.Spec.Name] = true
+				}
+			}
+		}
+		if ready[g.Database] {
+			declarable = append(declarable, g)
+		} else if waiting == "" {
+			waiting = g.Database
+		}
+	}
+	return declarable, waiting, nil
 }
 
 // syncDatabase declares the valid users, drops deleted ones and works out each user's phase.
@@ -256,7 +316,11 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 			}
 			continue
 		}
-		desired = append(desired, engine.DesiredUser{Username: s.user.Spec.Username, Roles: s.roles, Password: s.password})
+		roles := s.roles
+		if s.waiting != "" {
+			roles = s.declarable
+		}
+		desired = append(desired, engine.DesiredUser{Username: s.user.Spec.Username, Roles: roles, Password: s.password})
 	}
 
 	if err := eng.SyncUsers(ctx, target, desired); err != nil {
@@ -267,9 +331,12 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 			continue
 		}
 		s.declared = true
-		if dbUser, found := existing[s.user.Spec.Username]; found && engine.SameRoles(dbUser.Roles, s.roles) {
+		switch dbUser, found := existing[s.user.Spec.Username]; {
+		case s.waiting != "":
+			s.pending(s.waiting)
+		case found && engine.SameRoles(dbUser.Roles, s.roles):
 			s.phase = v1alpha1.PhaseReady
-		} else {
+		default:
 			s.pending(pendingMessage(ctx, eng, target, s.user.Spec.Username))
 		}
 	}
@@ -290,7 +357,7 @@ func (r *Reconciler) syncDatabase(ctx context.Context, eng engine.Engine, target
 			}
 			log.FromContext(ctx).Info("dropped database user", "user", u.Spec.Username, "instanceUser", u.Name)
 		}
-		if err := r.removeFinalizer(ctx, u); err != nil {
+		if err := removeFinalizer(ctx, r.Client, u, Finalizer); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -321,7 +388,7 @@ func usernameDeclared(users []engine.DesiredUser, username string) bool {
 // database can't be managed.
 func (r *Reconciler) abandon(ctx context.Context, live, deleting []*v1alpha1.InstanceUser, message string) error {
 	for _, u := range deleting {
-		if err := r.removeFinalizer(ctx, u); err != nil {
+		if err := removeFinalizer(ctx, r.Client, u, Finalizer); err != nil {
 			return err
 		}
 	}
@@ -333,56 +400,6 @@ func (r *Reconciler) abandon(ctx context.Context, live, deleting []*v1alpha1.Ins
 		}
 	}
 	return nil
-}
-
-// ensureMetadata adds the finalizer, the instance label and an owner
-// reference to the Instance, so deleting the instance deletes its users.
-func (r *Reconciler) ensureMetadata(ctx context.Context, u *v1alpha1.InstanceUser, instance *unstructured.Unstructured) error {
-	orig := u.DeepCopy()
-	controllerutil.AddFinalizer(u, Finalizer)
-	labels := u.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	labels[InstanceLabel] = instance.GetName()
-	u.SetLabels(labels)
-	if !hasOwner(u, instance.GetUID()) {
-		// Not blockOwnerDeletion: that would need update on instances/finalizers.
-		u.OwnerReferences = append(u.OwnerReferences, metav1.OwnerReference{
-			APIVersion: InstanceGVK.GroupVersion().String(),
-			Kind:       InstanceGVK.Kind,
-			Name:       instance.GetName(),
-			UID:        instance.GetUID(),
-		})
-	}
-	if equalMetadata(orig, u) {
-		return nil
-	}
-	return r.Client.Patch(ctx, u, client.MergeFrom(orig))
-}
-
-func hasOwner(obj metav1.Object, uid types.UID) bool {
-	for _, ref := range obj.GetOwnerReferences() {
-		if ref.UID == uid {
-			return true
-		}
-	}
-	return false
-}
-
-func equalMetadata(a, b *v1alpha1.InstanceUser) bool {
-	return len(a.Finalizers) == len(b.Finalizers) &&
-		a.Labels[InstanceLabel] == b.Labels[InstanceLabel] &&
-		len(a.OwnerReferences) == len(b.OwnerReferences)
-}
-
-func (r *Reconciler) removeFinalizer(ctx context.Context, u *v1alpha1.InstanceUser) error {
-	if !controllerutil.ContainsFinalizer(u, Finalizer) {
-		return nil
-	}
-	orig := u.DeepCopy()
-	controllerutil.RemoveFinalizer(u, Finalizer)
-	return client.IgnoreNotFound(r.Client.Patch(ctx, u, client.MergeFrom(orig)))
 }
 
 // ensureCredentials keeps the generated-password Secret: creates it with a

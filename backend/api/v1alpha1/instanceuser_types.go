@@ -4,7 +4,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Phases of an InstanceUser.
+// Phases of InstanceUsers and InstanceDatabases.
 const (
 	// PhasePending: the user is being created or changed in the database.
 	PhasePending = "Pending"
@@ -59,10 +59,11 @@ type InstanceUserSpec struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$`
 	Username string `json:"username"`
 	// Roles granted to the user. Only roles the plugin offers for the
-	// instance's engine are accepted.
-	// +kubebuilder:validation:MinItems=1
+	// instance's engine are accepted. PostgreSQL users may have none, e.g.
+	// the owner of an InstanceDatabase; other engines require one.
+	// +optional
 	// +listType=atomic
-	Roles []RoleGrant `json:"roles"`
+	Roles []RoleGrant `json:"roles,omitempty"`
 	// PasswordSecretRef points to the user's password. When omitted, the
 	// plugin generates a password and keeps it, with a connection string, in
 	// the Secret named in status.credentialsSecret.

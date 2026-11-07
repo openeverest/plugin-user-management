@@ -83,7 +83,8 @@ spec:
               roles:
                 description: |-
                   Roles granted to the user. Only roles the plugin offers for the
-                  instance's engine are accepted.
+                  instance's engine are accepted. PostgreSQL users may have none, e.g.
+                  the owner of an InstanceDatabase; other engines require one.
                 items:
                   description: RoleGrant grants a role, on a database for database-scoped
                     roles.
@@ -99,7 +100,6 @@ spec:
                   required:
                   - role
                   type: object
-                minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
               username:
@@ -108,7 +108,6 @@ spec:
                 type: string
             required:
             - instanceRef
-            - roles
             - username
             type: object
             x-kubernetes-validations:
