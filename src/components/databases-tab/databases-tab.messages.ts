@@ -1,10 +1,9 @@
 import { DatabaseConnect } from 'types/databases.types';
 
 export const Messages = {
-  tabLabel: 'Databases',
   title: 'Databases',
   subtitle:
-    'Databases of this instance and who owns them. Grant users read or readWrite on a database in the Users tab.',
+    'Databases of this instance and who owns them. Grant users read or readWrite on a database in Users.',
   createDatabase: 'Create database',
   loadFailed: (reason: string) => `Failed to load databases: ${reason}`,
   unsupported: 'Databases of this instance are not managed by OpenEverest.',
@@ -45,7 +44,7 @@ export const Messages = {
   owner: 'Owner',
   ownerHelper: 'Owns the database and the tables it creates. Run migrations as this user.',
   ownerRequired: 'Choose the owner.',
-  noOwners: 'Create the owner in the Users tab first; it needs no roles.',
+  noOwners: 'Create the owner in Users first; it needs no roles.',
   whoCanConnect: 'Who can connect',
   cancel: 'Cancel',
   create: 'Create',
