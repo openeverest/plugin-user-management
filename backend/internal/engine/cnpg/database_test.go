@@ -19,6 +19,7 @@ import (
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 func databaseObject(name string, labels map[string]any, spec, status map[string]any) *unstructured.Unstructured {
@@ -173,11 +174,12 @@ func TestSyncDatabaseReportsOperatorError(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInProgress with the operator's reason", err)
 	}
 
-	// A failure from an older generation isn't reported.
+	// CloudNativePG doesn't record the generation of a failed attempt, so a
+	// failure is reported whatever the observed generation.
 	_ = unstructured.SetNestedField(failed.Object, int64(0), "status", "observedGeneration")
 	e = newTestEngine(&fakeSession{}, []runtime.Object{cnpgCluster(appBootstrap, true), failed}, ownerSecret("pw"))
-	if err := e.SyncDatabase(context.Background(), target, ordersOwned); err != nil {
-		t.Fatalf("stale status: err = %v", err)
+	if err := e.SyncDatabase(context.Background(), target, ordersOwned); !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("unobserved failure: err = %v", err)
 	}
 }
 
@@ -289,5 +291,70 @@ func TestSyncDatabaseRestrictConnect(t *testing.T) {
 	stmts := pgaccess.PrivilegeStatements("orders", "orders_owner", nil, nil, pgaccess.Connect{Restricted: true, Roles: []string{"cnpg_metrics_exporter"}})
 	if !reflect.DeepEqual(s.executed, [][]string{stmts}) {
 		t.Fatalf("executed = %q", s.executed)
+	}
+}
+
+func TestSyncDatabaseExtensions(t *testing.T) {
+	ctx := context.Background()
+	s := &fakeSession{available: []engine.PostgreSQLExtension{{Name: "pg_trgm", Trusted: true}, {Name: "vector"}, {Name: "file_fdw"}}}
+	// CloudNativePG hasn't reconciled the latest spec yet.
+	pending := databaseObject(databaseObjectName("pg", "orders"), map[string]any{instanceLabel: "pg"}, map[string]any{"name": "orders"},
+		map[string]any{"applied": true, "observedGeneration": int64(1)})
+	pending.SetGeneration(2)
+	e := newTestEngine(s, []runtime.Object{cnpgCluster(appBootstrap, true), pending}, ownerSecret("pw"))
+	e.extensions = pgext.Policy{AllowTrusted: true, Allowed: []string{"vector"}}
+
+	want := ordersOwned
+	want.PostgreSQL = &engine.PostgreSQLDatabase{Extensions: []string{"pg_trgm", "vector"}, DropExtensions: []string{"hstore"}}
+	err := e.SyncDatabase(ctx, target, want)
+	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), "applying the database's extensions") {
+		t.Fatalf("err = %v", err)
+	}
+	exts, _, _ := unstructured.NestedSlice(e.applied[0].Object, "spec", "extensions")
+	wantExts := []any{
+		map[string]any{"name": "pg_trgm", "ensure": "present"},
+		map[string]any{"name": "vector", "ensure": "present"},
+		map[string]any{"name": "hstore", "ensure": "absent"},
+	}
+	if !reflect.DeepEqual(exts, wantExts) {
+		t.Fatalf("extensions = %v", exts)
+	}
+
+	want.PostgreSQL = &engine.PostgreSQLDatabase{Extensions: []string{"file_fdw"}}
+	if err := e.SyncDatabase(ctx, target, want); !errors.Is(err, engine.ErrInvalid) || !strings.Contains(err.Error(), "file_fdw") {
+		t.Fatalf("forbidden: err = %v", err)
+	}
+}
+
+func TestDatabaseExtensionStatus(t *testing.T) {
+	name := databaseObjectName("pg", "orders")
+	db := databaseObject(name, map[string]any{instanceLabel: "pg"}, map[string]any{"name": "orders"}, map[string]any{
+		"applied": false, "observedGeneration": int64(1), "message": "failed",
+		"extensions": []any{
+			map[string]any{"name": "vector", "applied": true},
+			map[string]any{"name": "postgis", "applied": false, "message": `extension "postgis" is not available`},
+		},
+	})
+	e := newTestEngine(&fakeSession{}, []runtime.Object{db})
+	err := e.databaseFailure(context.Background(), db, &engine.PostgreSQLDatabase{Extensions: []string{"vector", "postgis"}})
+	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), `postgis: extension "postgis" is not available`) {
+		t.Fatalf("err = %v", err)
+	}
+	// Applied: no error.
+	_ = unstructured.SetNestedField(db.Object, true, "status", "applied")
+	_ = unstructured.SetNestedSlice(db.Object, []any{map[string]any{"name": "vector", "applied": true}}, "status", "extensions")
+	e = newTestEngine(&fakeSession{}, []runtime.Object{db})
+	if err := e.databaseFailure(context.Background(), db, &engine.PostgreSQLDatabase{Extensions: []string{"vector"}}); err != nil {
+		t.Fatalf("applied: err = %v", err)
+	}
+}
+
+func TestAvailableExtensions(t *testing.T) {
+	s := &fakeSession{available: []engine.PostgreSQLExtension{{Name: "pg_trgm", Trusted: true}, {Name: "vector"}}}
+	e := newTestEngine(s, []runtime.Object{cnpgCluster(appBootstrap, true)})
+	e.extensions = pgext.Policy{Allowed: []string{"vector"}}
+	got, err := e.AvailableExtensions(context.Background(), target)
+	if err != nil || len(got) != 1 || got[0].Name != "vector" {
+		t.Fatalf("available = %+v, %v", got, err)
 	}
 }

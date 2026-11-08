@@ -46,7 +46,7 @@ export const DatabasesTab = ({ namespace, instanceName }: DatabasesTabProps) => 
     );
   }
 
-  const { databases, canManage, databaseError } = data;
+  const { databases, canManage, databaseError, postgresql } = data;
   const owners = ownerOptions(users.data?.users ?? []);
   const close = () => {
     [createDatabase, updateDatabase, deleteDatabase].forEach((m) => m.reset());
@@ -80,12 +80,15 @@ export const DatabasesTab = ({ namespace, instanceName }: DatabasesTabProps) => 
       {!databases.some((d) => d.managed) && <Alert severity="info">{Messages.noDatabases}</Alert>}
       <DatabasesTable
         databases={databases}
+        showExtensions={!!postgresql}
         canManage={canManage}
         onAction={(kind, database) => setDialog({ kind, database })}
       />
       {dialog?.kind === 'create' && (
         <DatabaseFormDialog
           owners={owners}
+          extensions={postgresql?.extensions}
+          extensionsError={postgresql?.extensionsError}
           isSubmitting={createDatabase.isPending}
           error={createDatabase.error?.message}
           onClose={close}
@@ -98,13 +101,19 @@ export const DatabasesTab = ({ namespace, instanceName }: DatabasesTabProps) => 
             name: dialog.database.name,
             ownerId: dialog.database.ownerId ?? '',
             connect: dialog.database.connect ?? 'Public',
+            postgresql: dialog.database.postgresql,
           }}
           owners={owners}
+          extensions={postgresql?.extensions}
+          extensionsError={postgresql?.extensionsError}
           isSubmitting={updateDatabase.isPending}
           error={updateDatabase.error?.message}
           onClose={close}
-          onSubmit={({ ownerId, connect }) =>
-            updateDatabase.mutate({ id: dialog.database.id, settings: { ownerId, connect } }, { onSuccess: close })
+          onSubmit={({ ownerId, connect, postgresql: pg }) =>
+            updateDatabase.mutate(
+              { id: dialog.database.id, settings: { ownerId, connect, postgresql: pg } },
+              { onSuccess: close }
+            )
           }
         />
       )}

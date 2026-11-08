@@ -113,6 +113,33 @@ spec:
                 required:
                 - instanceUserRef
                 type: object
+              postgresql:
+                description: |-
+                  PostgreSQL holds options only PostgreSQL instances accept; the
+                  InstanceDatabase fails on other engines when it's set.
+                properties:
+                  extensions:
+                    description: |-
+                      Extensions to create in the database. Removing one the plugin created
+                      drops it, unless objects still depend on it. Only extensions the
+                      instance has and the plugin's policy allows can be created.
+                    items:
+                      description: PostgreSQLExtension is an extension of a PostgreSQL
+                        database.
+                      properties:
+                        name:
+                          description: Name of the extension, as in CREATE EXTENSION.
+                          pattern: ^[a-z0-9][a-z0-9_-]{0,62}$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
             required:
             - instanceRef
             - name
@@ -208,6 +235,18 @@ spec:
                 type: string
               phase:
                 type: string
+              postgresql:
+                description: PostgreSQL is the state of PostgreSQL-only options.
+                properties:
+                  extensions:
+                    description: |-
+                      Extensions the plugin manages in the database: those it created, and
+                      those it's dropping.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
             type: object
         required:
         - spec

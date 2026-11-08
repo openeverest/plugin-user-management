@@ -38,6 +38,7 @@ import (
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/kserve"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/mongodb"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/perconapg"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 // dist/main.js is copied from the frontend build during the Docker build.
@@ -115,6 +116,15 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// extensionPolicy is which PostgreSQL extensions users may create in
+// databases, as set in the chart's postgresql.extensions values.
+func extensionPolicy() pgext.Policy {
+	return pgext.Policy{
+		AllowTrusted: os.Getenv("POSTGRESQL_EXTENSIONS_ALLOW_TRUSTED") != "false",
+		Allowed:      pgext.ParseList(os.Getenv("POSTGRESQL_EXTENSIONS_ALLOWED")),
+	}
+}
+
 func newScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -173,8 +183,8 @@ func main() {
 	}
 	engines := map[string]engine.Engine{
 		mongodb.ProviderName:   mongodb.New(kube, dyn),
-		cnpg.ProviderName:      cnpg.New(kube, dyn),
-		perconapg.ProviderName: perconapg.New(kube, dyn),
+		cnpg.ProviderName:      cnpg.New(kube, dyn, extensionPolicy()),
+		perconapg.ProviderName: perconapg.New(kube, dyn, extensionPolicy()),
 		kserve.ProviderName:    kserve.New(kube, dyn),
 	}
 

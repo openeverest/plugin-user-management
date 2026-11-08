@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -83,6 +84,8 @@ type databaseState struct {
 	declared      bool
 	// available is sticky: set once SyncDatabase succeeded.
 	available bool
+	// extensions the plugin manages in the database (status.postgresql).
+	extensions []string
 	// ownerProblem keeps the database from being declared; a conflict with
 	// an existing database is reported first, as it won't resolve itself.
 	ownerProblem string
@@ -147,8 +150,12 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := ensureInstanceMetadata(ctx, r.Client, db, instance, DatabaseFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
-		s := &databaseState{db: db, declared: db.Status.Declared, available: db.Status.Available}
+		s := &databaseState{db: db, declared: db.Status.Declared, available: db.Status.Available, extensions: managedExtensions(db)}
 		states = append(states, s)
+		if _, isPostgreSQL := eng.(engine.PostgreSQLEngine); db.Spec.PostgreSQL != nil && !isPostgreSQL {
+			s.fail(fmt.Sprintf("spec.postgresql applies to PostgreSQL instances only, not to provider %q", provider))
+			continue
+		}
 		if err := eng.ValidateDatabase(db.Spec.Name); err != nil {
 			s.fail(err.Error())
 			continue
@@ -282,10 +289,22 @@ func (r *DatabaseReconciler) syncDatabases(ctx context.Context, eng engine.Datab
 			}
 		}
 		claimed[name] = true
-		err := eng.SyncDatabase(ctx, target, engine.DesiredDatabase{
+		desired := engine.DesiredDatabase{
 			Name: name, Owner: s.owner, OwnerPassword: s.ownerPassword,
 			RestrictConnect: s.db.Spec.Connect == v1alpha1.ConnectGranted,
-		})
+		}
+		wanted := wantedExtensions(s.db)
+		if _, ok := eng.(engine.PostgreSQLEngine); ok {
+			desired.PostgreSQL = postgreSQLOptions(wanted, s.extensions)
+		}
+		err := eng.SyncDatabase(ctx, target, desired)
+		switch {
+		case err == nil:
+			s.extensions = wanted
+		case !errors.Is(err, engine.ErrInvalid):
+			// Some may have been created: keep managing them all until applied.
+			s.extensions = union(s.extensions, wanted)
+		}
 		switch {
 		case errors.Is(err, engine.ErrInvalid):
 			s.fail(err.Error())
@@ -359,6 +378,10 @@ func (r *DatabaseReconciler) writeStatus(ctx context.Context, s *databaseState) 
 		st.Message = s.message
 		st.Declared = s.declared
 		st.Available = st.Available || s.available
+		st.PostgreSQL = nil
+		if len(s.extensions) > 0 {
+			st.PostgreSQL = &v1alpha1.PostgreSQLDatabaseStatus{Extensions: s.extensions}
+		}
 		st.ObservedGeneration = db.Generation
 		if s.owner != "" {
 			st.Owner = s.owner
@@ -375,4 +398,50 @@ func (r *DatabaseReconciler) writeStatus(ctx context.Context, s *databaseState) 
 		}
 		meta.SetStatusCondition(&st.Conditions, condition)
 	})
+}
+
+// wantedExtensions are the extensions the InstanceDatabase declares, sorted.
+func wantedExtensions(db *v1alpha1.InstanceDatabase) []string {
+	if db.Spec.PostgreSQL == nil {
+		return nil
+	}
+	var names []string
+	for _, e := range db.Spec.PostgreSQL.Extensions {
+		names = append(names, e.Name)
+	}
+	return union(nil, names)
+}
+
+func managedExtensions(db *v1alpha1.InstanceDatabase) []string {
+	if db.Status.PostgreSQL == nil {
+		return nil
+	}
+	return db.Status.PostgreSQL.Extensions
+}
+
+// postgreSQLOptions declares the wanted extensions and drops the managed
+// ones that aren't wanted any more; nil when there are neither.
+func postgreSQLOptions(wanted, managed []string) *engine.PostgreSQLDatabase {
+	var drop []string
+	for _, name := range managed {
+		if !slices.Contains(wanted, name) {
+			drop = append(drop, name)
+		}
+	}
+	if len(wanted)+len(drop) == 0 {
+		return nil
+	}
+	return &engine.PostgreSQLDatabase{Extensions: wanted, DropExtensions: drop}
+}
+
+// union returns the sorted names of both lists, each once.
+func union(a, b []string) []string {
+	var out []string
+	for _, name := range append(slices.Clone(a), b...) {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

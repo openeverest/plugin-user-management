@@ -17,6 +17,7 @@ import (
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 // ProviderName is the provider (Instance spec.providerRef.name) this engine serves.
@@ -29,12 +30,14 @@ type Engine struct {
 	dial   dialer
 	dialAs userDialer
 	apply  func(ctx context.Context, obj *unstructured.Unstructured) error
+	// extensions are those users may create in databases.
+	extensions pgext.Policy
 }
 
 // New returns an engine that writes DatabaseRoles and Databases, reads
 // Clusters and reads roles and databases with pgx.
-func New(kube kubernetes.Interface, dyn dynamic.Interface) *Engine {
-	e := &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube), dialAs: pgxUserDialer(kube)}
+func New(kube kubernetes.Interface, dyn dynamic.Interface, extensions pgext.Policy) *Engine {
+	e := &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube), dialAs: pgxUserDialer(kube), extensions: extensions}
 	e.apply = e.applyObject
 	return e
 }

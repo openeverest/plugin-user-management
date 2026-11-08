@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,7 +17,7 @@ import (
 
 var databaseResource = schema.GroupVersionResource{Group: "postgresql.cnpg.io", Version: "v1", Resource: "databases"}
 
-var _ engine.DatabaseEngine = (*Engine)(nil)
+var _ engine.PostgreSQLEngine = (*Engine)(nil)
 
 // PostgreSQL's own databases, which CloudNativePG refuses to declare.
 var reservedDatabases = []string{defaultDatabase, "template0", "template1"}
@@ -121,11 +122,14 @@ func (e *Engine) SyncDatabase(ctx context.Context, target engine.Target, want en
 	if reserved[want.Name] {
 		return fmt.Errorf("%w: database %q is reserved for the operator", engine.ErrInvalidDatabase, want.Name)
 	}
+	if err := e.checkExtensions(ctx, c, want.PostgreSQL); err != nil {
+		return err
+	}
 	obj := databaseApplyConfiguration(c, want)
 	if err := e.apply(ctx, obj); err != nil {
 		return err
 	}
-	if err := e.databaseFailure(ctx, obj); err != nil {
+	if err := e.databaseFailure(ctx, obj, want.PostgreSQL); err != nil {
 		return err
 	}
 	for _, access := range pgaccess.AccessRoles {
@@ -228,31 +232,112 @@ func databaseApplyConfiguration(c cluster, want engine.DesiredDatabase) *unstruc
 				"uid":        string(c.uid),
 			}},
 		},
-		"spec": map[string]any{
-			"cluster":               map[string]any{"name": c.name},
-			"name":                  want.Name,
-			"owner":                 want.Owner,
-			"ensure":                "present",
-			"databaseReclaimPolicy": reclaimRetain,
-		},
+		"spec": databaseSpec(c, want),
 	}}
+}
+
+// databaseSpec is the Database's spec. Extensions to drop stay declared
+// with ensure absent until CloudNativePG has dropped them.
+func databaseSpec(c cluster, want engine.DesiredDatabase) map[string]any {
+	spec := map[string]any{
+		"cluster":               map[string]any{"name": c.name},
+		"name":                  want.Name,
+		"owner":                 want.Owner,
+		"ensure":                "present",
+		"databaseReclaimPolicy": reclaimRetain,
+	}
+	if pg := want.PostgreSQL; pg != nil && len(pg.Extensions)+len(pg.DropExtensions) > 0 {
+		var exts []any
+		for _, name := range pg.Extensions {
+			exts = append(exts, map[string]any{"name": name, "ensure": "present"})
+		}
+		for _, name := range pg.DropExtensions {
+			exts = append(exts, map[string]any{"name": name, "ensure": "absent"})
+		}
+		spec["extensions"] = exts
+	}
+	return spec
+}
+
+// checkExtensions refuses extensions the policy doesn't allow. Those the
+// instance doesn't have are left to CloudNativePG, which reports them.
+func (e *Engine) checkExtensions(ctx context.Context, c cluster, pg *engine.PostgreSQLDatabase) error {
+	if pg == nil || len(pg.Extensions) == 0 {
+		return nil
+	}
+	available, err := e.availableExtensions(ctx, c)
+	if err != nil {
+		return err
+	}
+	if forbidden, _ := e.extensions.Check(pg.Extensions, available); len(forbidden) > 0 {
+		return fmt.Errorf("%w: extensions %s can't be created: the plugin's policy doesn't allow them", engine.ErrInvalidDatabase, strings.Join(forbidden, ", "))
+	}
+	return nil
+}
+
+func (e *Engine) availableExtensions(ctx context.Context, c cluster) ([]engine.PostgreSQLExtension, error) {
+	if !c.ready {
+		return nil, fmt.Errorf("%w: PostgreSQL cluster is %q", engine.ErrNotReady, c.phase)
+	}
+	s, err := e.dial(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	defer s.close(ctx)
+	return s.availableExtensions(ctx)
+}
+
+// AvailableExtensions implements engine.PostgreSQLEngine.
+func (e *Engine) AvailableExtensions(ctx context.Context, target engine.Target) ([]engine.PostgreSQLExtension, error) {
+	c, err := e.resolve(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	available, err := e.availableExtensions(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return e.extensions.Filter(available), nil
 }
 
 // databaseFailure returns CloudNativePG's error for the Database, as
 // ErrInProgress, once it has reconciled the current spec.
-func (e *Engine) databaseFailure(ctx context.Context, applied *unstructured.Unstructured) error {
+// With extensions to create or drop, it also waits until CloudNativePG has
+// applied them, so the controller only records them once they are.
+func (e *Engine) databaseFailure(ctx context.Context, applied *unstructured.Unstructured, pg *engine.PostgreSQLDatabase) error {
 	obj, err := e.dyn.Resource(databaseResource).Namespace(applied.GetNamespace()).Get(ctx, applied.GetName(), metav1.GetOptions{})
 	if err != nil {
 		return nil
 	}
-	observed, _, _ := unstructured.NestedInt64(obj.Object, "status", "observedGeneration")
-	if observed != obj.GetGeneration() {
-		return nil
+	// CloudNativePG only records observedGeneration when it applies a spec, so
+	// a failure is always from its latest attempt, whatever the generation.
+	if reasons := extensionFailures(obj); len(reasons) > 0 {
+		return fmt.Errorf("%w: CloudNativePG can't apply the database's extensions: %s", engine.ErrInProgress, strings.Join(reasons, "; "))
 	}
 	if reason := failureReason(obj); reason != "" {
 		return fmt.Errorf("%w: CloudNativePG can't apply the database: %s", engine.ErrInProgress, reason)
 	}
+	observed, _, _ := unstructured.NestedInt64(obj.Object, "status", "observedGeneration")
+	if observed != obj.GetGeneration() && pg != nil && len(pg.Extensions)+len(pg.DropExtensions) > 0 {
+		return fmt.Errorf("%w: CloudNativePG is applying the database's extensions", engine.ErrInProgress)
+	}
 	return nil
+}
+
+// extensionFailures are CloudNativePG's errors for the Database's extensions.
+func extensionFailures(obj *unstructured.Unstructured) []string {
+	statuses, _, _ := unstructured.NestedSlice(obj.Object, "status", "extensions")
+	var reasons []string
+	for _, item := range statuses {
+		st, ok := item.(map[string]any)
+		if !ok || st["applied"] == true {
+			continue
+		}
+		name, _ := st["name"].(string)
+		message, _ := st["message"].(string)
+		reasons = append(reasons, name+": "+message)
+	}
+	return reasons
 }
 
 // ReleaseDatabase implements engine.DatabaseEngine by deleting the Database

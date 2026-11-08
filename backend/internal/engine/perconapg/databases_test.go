@@ -12,6 +12,7 @@ import (
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 func TestValidateDatabase(t *testing.T) {
@@ -192,5 +193,72 @@ func TestSyncDatabaseRestrictConnect(t *testing.T) {
 	want := pgaccess.PrivilegeStatements("orders", "o", nil, nil, pgaccess.Connect{Restricted: true, Roles: []string{"_crunchypgbouncer", "everest-monitor"}})
 	if got := s.executed[len(s.executed)-1]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("executed =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestSyncDatabaseExtensions(t *testing.T) {
+	ctx := context.Background()
+	s := &fakeSession{
+		dbs:       []dbDatabase{{name: "orders", owner: "o", comment: managedComment}},
+		state:     map[string]*roleState{"oe_orders_read": {comment: managedComment}, "oe_orders_readwrite": {comment: managedComment}},
+		available: []engine.PostgreSQLExtension{{Name: "pg_trgm", Trusted: true}, {Name: "vector"}, {Name: "file_fdw"}, {Name: "hstore", Trusted: true}},
+		installed: []string{"plpgsql", "hstore"},
+	}
+	e := newTestEngine(s, pgCluster(providerSpec(), "ready"))
+	e.extensions = pgext.Policy{AllowTrusted: true, Allowed: []string{"vector", "postgis"}}
+
+	want := engine.DesiredDatabase{Name: "orders", Owner: "o", PostgreSQL: &engine.PostgreSQLDatabase{
+		Extensions: []string{"pg_trgm", "vector"}, DropExtensions: []string{"hstore"},
+	}}
+	if err := e.SyncDatabase(ctx, target, want); err != nil {
+		t.Fatal(err)
+	}
+	var extStmts []string
+	for _, stmts := range s.executed {
+		for _, stmt := range stmts {
+			if strings.Contains(stmt, "EXTENSION") {
+				extStmts = append(extStmts, stmt)
+			}
+		}
+	}
+	wantStmts := []string{`DROP EXTENSION IF EXISTS "hstore"`, `CREATE EXTENSION IF NOT EXISTS "pg_trgm"`, `CREATE EXTENSION IF NOT EXISTS "vector"`}
+	if !reflect.DeepEqual(extStmts, wantStmts) {
+		t.Fatalf("statements = %q", extStmts)
+	}
+
+	// Not allowed: Failed; not on the instance: Pending with the reason.
+	want.PostgreSQL = &engine.PostgreSQLDatabase{Extensions: []string{"file_fdw"}}
+	if err := e.SyncDatabase(ctx, target, want); !errors.Is(err, engine.ErrInvalid) || !strings.Contains(err.Error(), "file_fdw") {
+		t.Fatalf("forbidden: err = %v", err)
+	}
+	want.PostgreSQL = &engine.PostgreSQLDatabase{Extensions: []string{"postgis"}}
+	if err := e.SyncDatabase(ctx, target, want); !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), "postgis is not available") {
+		t.Fatalf("missing: err = %v", err)
+	}
+}
+
+func TestDropExtensionRefused(t *testing.T) {
+	s := &fakeSession{
+		dbs:       []dbDatabase{{name: "orders", owner: "o", comment: managedComment}},
+		state:     map[string]*roleState{"oe_orders_read": {comment: managedComment}, "oe_orders_readwrite": {comment: managedComment}},
+		installed: []string{"vector"},
+	}
+	e := newTestEngine(s, pgCluster(providerSpec(), "ready"))
+	// Every exec fails like a DROP that objects depend on.
+	s.execErr = &pgconn.PgError{Message: "cannot drop extension vector because other objects depend on it"}
+	err := e.syncExtensions(context.Background(), clusterFrom(pgCluster(providerSpec(), "ready")),
+		engine.DesiredDatabase{Name: "orders", PostgreSQL: &engine.PostgreSQLDatabase{DropExtensions: []string{"vector"}}})
+	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), "can't drop vector: cannot drop extension vector because other objects depend on it") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAvailableExtensions(t *testing.T) {
+	s := &fakeSession{available: []engine.PostgreSQLExtension{{Name: "pg_trgm", Trusted: true}, {Name: "vector"}, {Name: "plpgsql", Trusted: true}}}
+	e := newTestEngine(s, pgCluster(providerSpec(), "ready"))
+	e.extensions = pgext.Policy{AllowTrusted: true}
+	got, err := e.AvailableExtensions(context.Background(), target)
+	if err != nil || len(got) != 1 || got[0].Name != "pg_trgm" {
+		t.Fatalf("available = %+v, %v", got, err)
 	}
 }

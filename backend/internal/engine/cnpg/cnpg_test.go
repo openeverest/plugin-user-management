@@ -56,12 +56,14 @@ func databaseRole(name string, labels map[string]any, spec, status map[string]an
 }
 
 type fakeSession struct {
-	dbRoles  []dbRole
-	dbs      []dbDatabase
-	objects  []pgaccess.Object
-	existing []string
-	executed [][]string
-	execErr  error
+	dbRoles   []dbRole
+	dbs       []dbDatabase
+	objects   []pgaccess.Object
+	existing  []string
+	available []engine.PostgreSQLExtension
+	installed []string
+	executed  [][]string
+	execErr   error
 	// dialedAs records database/user of the connections made as a user.
 	dialedAs []string
 	closed   bool
@@ -69,6 +71,9 @@ type fakeSession struct {
 
 func (f *fakeSession) roles(context.Context) ([]dbRole, error)         { return f.dbRoles, nil }
 func (f *fakeSession) databases(context.Context) ([]dbDatabase, error) { return f.dbs, nil }
+func (f *fakeSession) availableExtensions(context.Context) ([]engine.PostgreSQLExtension, error) {
+	return f.available, nil
+}
 func (f *fakeSession) existingRoles(_ context.Context, names []string) ([]string, error) {
 	var found []string
 	for _, n := range names {

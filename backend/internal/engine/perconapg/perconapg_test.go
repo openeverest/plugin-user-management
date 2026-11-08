@@ -53,16 +53,18 @@ func passwordSecret(name, key, value string) *corev1.Secret {
 }
 
 type fakeSession struct {
-	dbRoles  []dbRole
-	state    map[string]*roleState
-	dbs      []dbDatabase
-	schemas  []string
-	objects  []pgaccess.Object
-	dialed   []string
-	existing []string
-	executed [][]string
-	execErr  error
-	closed   bool
+	dbRoles   []dbRole
+	state     map[string]*roleState
+	dbs       []dbDatabase
+	schemas   []string
+	objects   []pgaccess.Object
+	dialed    []string
+	existing  []string
+	available []engine.PostgreSQLExtension
+	installed []string
+	executed  [][]string
+	execErr   error
+	closed    bool
 }
 
 func (f *fakeSession) roles(context.Context) ([]dbRole, error) { return f.dbRoles, nil }
@@ -80,6 +82,12 @@ func (f *fakeSession) exec(_ context.Context, stmts []string) error {
 func (f *fakeSession) execEach(ctx context.Context, stmts []string) error { return f.exec(ctx, stmts) }
 func (f *fakeSession) grantTargets(context.Context, string, string) ([]string, []pgaccess.Object, error) {
 	return f.schemas, f.objects, nil
+}
+func (f *fakeSession) availableExtensions(context.Context) ([]engine.PostgreSQLExtension, error) {
+	return f.available, nil
+}
+func (f *fakeSession) installedExtensions(context.Context) ([]string, error) {
+	return f.installed, nil
 }
 func (f *fakeSession) existingRoles(_ context.Context, names []string) ([]string, error) {
 	var found []string

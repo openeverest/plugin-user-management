@@ -1,7 +1,9 @@
 import { FormEvent, useState } from 'react';
 import {
   Alert,
+  Autocomplete,
   Button,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -16,7 +18,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { DatabaseConnect, NewDatabase } from 'types/databases.types';
+import { DatabaseConnect, NewDatabase, PostgreSQLExtension } from 'types/databases.types';
 import { OwnerOption } from '../databases-tab.types';
 import { validateDatabaseForm } from '../databases-tab.utils';
 import { Messages } from '../databases-tab.messages';
@@ -27,6 +29,10 @@ interface DatabaseFormDialogProps {
   // The database being edited; creates one when absent.
   initial?: NewDatabase;
   owners: OwnerOption[];
+  // Extensions users may create, on PostgreSQL instances; no picker otherwise.
+  extensions?: PostgreSQLExtension[];
+  // Why the extensions can't be listed.
+  extensionsError?: string;
   isSubmitting: boolean;
   error?: string;
   onSubmit: (database: NewDatabase) => void;
@@ -36,6 +42,8 @@ interface DatabaseFormDialogProps {
 export const DatabaseFormDialog = ({
   initial,
   owners,
+  extensions,
+  extensionsError,
   isSubmitting,
   error,
   onSubmit,
@@ -54,7 +62,12 @@ export const DatabaseFormDialog = ({
     if (Object.values(errors).some(Boolean)) {
       return;
     }
-    onSubmit({ ...values, name: values.name.trim() });
+    const { postgresql, ...rest } = values;
+    onSubmit({
+      ...rest,
+      name: values.name.trim(),
+      ...(extensions ? { postgresql: { extensions: postgresql?.extensions ?? [] } } : {}),
+    });
   };
 
   return (
@@ -116,6 +129,14 @@ export const DatabaseFormDialog = ({
                 ))}
               </RadioGroup>
             </FormControl>
+            {extensions && (
+              <ExtensionsPicker
+                available={extensions}
+                error={extensionsError}
+                value={values.postgresql?.extensions ?? []}
+                onChange={(names) => setValues((v) => ({ ...v, postgresql: { extensions: names } }))}
+              />
+            )}
             {error && <Alert severity="error">{error}</Alert>}
           </Stack>
         </DialogContent>
@@ -127,5 +148,65 @@ export const DatabaseFormDialog = ({
         </DialogActions>
       </form>
     </Dialog>
+  );
+};
+
+interface ExtensionsPickerProps {
+  available: PostgreSQLExtension[];
+  error?: string;
+  value: string[];
+  onChange: (names: string[]) => void;
+}
+
+const ExtensionsPicker = ({ available, error, value, onChange }: ExtensionsPickerProps) => {
+  // Keeps extensions the database has that are no longer offered.
+  const options = [...available.map((e) => e.name), ...value.filter((n) => !available.some((e) => e.name === n))];
+  const describe = (name: string) => available.find((e) => e.name === name);
+  return (
+    <>
+      <Autocomplete
+        multiple
+        size="small"
+        options={options}
+        value={value}
+        onChange={(_, names) => onChange(names)}
+        renderValue={(names, getItemProps) =>
+          names.map((name, index) => {
+            const { key, ...itemProps } = getItemProps({ index });
+            return <Chip key={key} size="small" label={name} {...itemProps} />;
+          })
+        }
+        renderOption={({ key, ...props }, name) => {
+          const ext = describe(name);
+          return (
+            <li key={key} {...props}>
+              <Stack>
+                <Typography variant="body2">
+                  {name}
+                  {ext?.trusted && (
+                    <Typography component="span" variant="caption" color="text.secondary">
+                      {` (${Messages.trusted})`}
+                    </Typography>
+                  )}
+                </Typography>
+                {ext?.description && (
+                  <Typography variant="caption" color="text.secondary">
+                    {ext.description}
+                  </Typography>
+                )}
+              </Stack>
+            </li>
+          );
+        }}
+        renderInput={(params) => (
+          <TextField
+            {...params}
+            label={Messages.extensions}
+            helperText={available.length || value.length ? Messages.extensionsHelper : Messages.noExtensions}
+          />
+        )}
+      />
+      {error && <Alert severity="warning">{Messages.extensionsUnavailable(error)}</Alert>}
+    </>
   );
 };

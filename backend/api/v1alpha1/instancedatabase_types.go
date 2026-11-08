@@ -61,6 +61,29 @@ type InstanceDatabaseSpec struct {
 	// +kubebuilder:default=Public
 	// +optional
 	Connect string `json:"connect,omitempty"`
+	// PostgreSQL holds options only PostgreSQL instances accept; the
+	// InstanceDatabase fails on other engines when it's set.
+	// +optional
+	PostgreSQL *PostgreSQLDatabaseOptions `json:"postgresql,omitempty"`
+}
+
+// PostgreSQLDatabaseOptions are options of a PostgreSQL database.
+type PostgreSQLDatabaseOptions struct {
+	// Extensions to create in the database. Removing one the plugin created
+	// drops it, unless objects still depend on it. Only extensions the
+	// instance has and the plugin's policy allows can be created.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	Extensions []PostgreSQLExtension `json:"extensions,omitempty"`
+}
+
+// PostgreSQLExtension is an extension of a PostgreSQL database.
+type PostgreSQLExtension struct {
+	// Name of the extension, as in CREATE EXTENSION.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9_-]{0,62}$`
+	Name string `json:"name"`
 }
 
 // InstanceDatabaseStatus is the observed state of an InstanceDatabase.
@@ -82,12 +105,24 @@ type InstanceDatabaseStatus struct {
 	// even while it's Pending again, e.g. during an owner change.
 	// +optional
 	Available bool `json:"available,omitempty"`
+	// PostgreSQL is the state of PostgreSQL-only options.
+	// +optional
+	PostgreSQL *PostgreSQLDatabaseStatus `json:"postgresql,omitempty"`
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// PostgreSQLDatabaseStatus is the state of a PostgreSQL database's options.
+type PostgreSQLDatabaseStatus struct {
+	// Extensions the plugin manages in the database: those it created, and
+	// those it's dropping.
+	// +listType=set
+	// +optional
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // InstanceDatabase is a database of an OpenEverest instance.

@@ -22,6 +22,7 @@ import (
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 // ProviderName is the provider (Instance spec.providerRef.name) this engine serves.
@@ -32,14 +33,16 @@ type Engine struct {
 	kube kubernetes.Interface
 	dyn  dynamic.Interface
 	dial dialer
+	// extensions are those users may create in databases.
+	extensions pgext.Policy
 	// problems keeps why a user couldn't be applied in the last SyncUsers,
 	// by namespace/instance/username, for PendingReason.
 	problems sync.Map
 }
 
 // New returns an engine that reads PerconaPGClusters and manages roles with pgx.
-func New(kube kubernetes.Interface, dyn dynamic.Interface) *Engine {
-	return &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube)}
+func New(kube kubernetes.Interface, dyn dynamic.Interface, extensions pgext.Policy) *Engine {
+	return &Engine{kube: kube, dyn: dyn, dial: pgxDialer(kube), extensions: extensions}
 }
 
 // Roles implements engine.Engine.

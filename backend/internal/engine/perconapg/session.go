@@ -18,6 +18,7 @@ import (
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 const (
@@ -93,6 +94,10 @@ type session interface {
 	grantTargets(ctx context.Context, read, readWrite string) ([]string, []pgaccess.Object, error)
 	// existingRoles returns which of the roles exist.
 	existingRoles(ctx context.Context, names []string) ([]string, error)
+	// availableExtensions lists the extensions the instance has.
+	availableExtensions(ctx context.Context) ([]engine.PostgreSQLExtension, error)
+	// installedExtensions lists the extensions of the session's database.
+	installedExtensions(ctx context.Context) ([]string, error)
 	close(ctx context.Context)
 }
 
@@ -262,6 +267,14 @@ func (s *pgxSession) existingRoles(ctx context.Context, names []string) ([]strin
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 	return roles, nil
+}
+
+func (s *pgxSession) availableExtensions(ctx context.Context) ([]engine.PostgreSQLExtension, error) {
+	return pgext.Available(ctx, s.conn)
+}
+
+func (s *pgxSession) installedExtensions(ctx context.Context) ([]string, error) {
+	return pgext.Installed(ctx, s.conn)
 }
 
 func (s *pgxSession) close(ctx context.Context) {

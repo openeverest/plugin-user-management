@@ -24,6 +24,8 @@ import { Messages } from '../databases-tab.messages';
 
 interface DatabasesTableProps {
   databases: Database[];
+  // Shows the databases' extensions, on PostgreSQL instances.
+  showExtensions?: boolean;
   canManage: boolean;
   onAction: (action: DatabaseAction, database: ManagedDatabase) => void;
 }
@@ -80,7 +82,7 @@ const DatabaseActionsMenu = ({
   );
 };
 
-export const DatabasesTable = ({ databases, canManage, onAction }: DatabasesTableProps) => (
+export const DatabasesTable = ({ databases, showExtensions, canManage, onAction }: DatabasesTableProps) => (
   <TableContainer component={Paper} variant="outlined">
     <Table size="small">
       <TableHead>
@@ -88,6 +90,7 @@ export const DatabasesTable = ({ databases, canManage, onAction }: DatabasesTabl
           <TableCell>{Messages.columns.name}</TableCell>
           <TableCell>{Messages.columns.owner}</TableCell>
           <TableCell>{Messages.columns.connect}</TableCell>
+          {showExtensions && <TableCell>{Messages.columns.extensions}</TableCell>}
           <TableCell>{Messages.columns.status}</TableCell>
           <TableCell align="right">{Messages.columns.actions}</TableCell>
         </TableRow>
@@ -111,6 +114,15 @@ export const DatabasesTable = ({ databases, canManage, onAction }: DatabasesTabl
                 </Tooltip>
               )}
             </TableCell>
+            {showExtensions && (
+              <TableCell>
+                <Stack direction="row" sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                  {db.postgresql?.extensions.map((name) => (
+                    <Chip key={name} size="small" variant="outlined" label={name} />
+                  ))}
+                </Stack>
+              </TableCell>
+            )}
             <TableCell>{db.phase && <UserStatus phase={db.phase} message={db.message} />}</TableCell>
             <TableCell align="right">
               {isManagedDatabase(db) && (

@@ -15,7 +15,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgaccess"
+	"github.com/openeverest/plugin-user-management/backend/internal/engine/pgext"
 )
 
 const (
@@ -66,6 +68,8 @@ type session interface {
 	exec(ctx context.Context, stmts []string) error
 	// existingRoles returns which of the roles exist.
 	existingRoles(ctx context.Context, names []string) ([]string, error)
+	// availableExtensions lists the extensions the instance has.
+	availableExtensions(ctx context.Context) ([]engine.PostgreSQLExtension, error)
 	close(ctx context.Context)
 }
 
@@ -234,6 +238,10 @@ func (s *pgxSession) existingRoles(ctx context.Context, names []string) ([]strin
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 	return roles, nil
+}
+
+func (s *pgxSession) availableExtensions(ctx context.Context) ([]engine.PostgreSQLExtension, error) {
+	return pgext.Available(ctx, s.conn)
 }
 
 func (s *pgxSession) close(ctx context.Context) {
