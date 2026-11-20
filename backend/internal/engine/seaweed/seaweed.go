@@ -69,6 +69,10 @@ func (e *Engine) ValidateUser(user engine.DesiredUser) error {
 	return err
 }
 
+func (e *Engine) ExternalCredentialsSupported() bool {
+	return false
+}
+
 func (e *Engine) PrepareCredentialSecret(
 	_ context.Context,
 	_ engine.Target,

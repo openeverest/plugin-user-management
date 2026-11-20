@@ -44,7 +44,16 @@ export const UsersTab = ({ namespace, instanceName }: UsersTabProps) => {
     );
   }
 
-  const { users, roles, canManage, databaseError, credentialKind, rolesRequired, databasesSupported } = data;
+  const {
+    users,
+    roles,
+    canManage,
+    databaseError,
+    credentialKind,
+    rolesRequired,
+    databasesSupported,
+    externalCredentialsSupported,
+  } = data;
   const terms = termsFor(credentialKind);
   return (
     <TermsContext.Provider value={terms}>
@@ -81,6 +90,7 @@ export const UsersTab = ({ namespace, instanceName }: UsersTabProps) => {
           target={target}
           roles={roles}
           rolesRequired={rolesRequired !== false}
+          externalCredentialsSupported={externalCredentialsSupported}
           databases={databasesSupported ? grantableDatabases(databases.data?.databases ?? []) : undefined}
           dialog={dialog}
           onClose={() => setDialog(null)}

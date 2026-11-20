@@ -6,6 +6,11 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
+  FormControlLabel,
+  FormLabel,
+  Radio,
+  RadioGroup,
   Stack,
   TextField,
   Typography,
@@ -37,6 +42,7 @@ interface UserFormDialogProps {
   rolesRequired?: boolean;
   // The databases database-scoped roles can be granted on, when managed.
   databases?: string[];
+  externalCredentialsSupported?: boolean;
   onSubmit: (user: NewUser) => void;
   onClose: () => void;
 }
@@ -50,6 +56,7 @@ export const UserFormDialog = ({
   error,
   rolesRequired = true,
   databases,
+  externalCredentialsSupported = false,
   onSubmit,
   onClose,
 }: UserFormDialogProps) => {
@@ -70,9 +77,17 @@ export const UserFormDialog = ({
     if (hasErrors(errors)) {
       return;
     }
+    const external = values.credentialSource === 'secret';
     onSubmit({
       username: isCreate ? values.username.trim() : username,
-      password: values.password || undefined,
+      ...(external
+        ? {
+            passwordSecretRef: {
+              name: values.secretName?.trim() ?? '',
+              key: values.secretKey?.trim() || undefined,
+            },
+          }
+        : { password: values.password || undefined }),
       roles: toRoleGrants(values.roles, roles),
     });
   };
@@ -94,7 +109,32 @@ export const UserFormDialog = ({
                   error={submitted && !!errors.username}
                   helperText={submitted ? errors.username : undefined}
                 />
-                {terms.customSecret && (
+                {externalCredentialsSupported && (
+                  <FormControl>
+                    <FormLabel>{Messages.credentialSource}</FormLabel>
+                    <RadioGroup
+                      value={values.credentialSource}
+                      onChange={(e) =>
+                        setValues((v) => ({
+                          ...v,
+                          credentialSource: e.target.value as 'generated' | 'secret',
+                        }))
+                      }
+                    >
+                      <FormControlLabel
+                        value="generated"
+                        control={<Radio size="small" />}
+                        label={Messages.generateCredential}
+                      />
+                      <FormControlLabel
+                        value="secret"
+                        control={<Radio size="small" />}
+                        label={Messages.useExistingSecret}
+                      />
+                    </RadioGroup>
+                  </FormControl>
+                )}
+                {terms.customSecret && values.credentialSource === 'generated' && (
                   <TextField
                     size="small"
                     type="password"
@@ -105,6 +145,30 @@ export const UserFormDialog = ({
                     error={submitted && !!errors.password}
                     helperText={(submitted && errors.password) || Messages.passwordHelper}
                   />
+                )}
+                {values.credentialSource === 'secret' && (
+                  <>
+                    <Typography variant="body2" color="text.secondary">
+                      {Messages.externalSecretHelper}
+                    </Typography>
+                    <TextField
+                      size="small"
+                      label={Messages.secretName}
+                      value={values.secretName}
+                      onChange={(e) =>
+                        setValues((v) => ({ ...v, secretName: e.target.value }))
+                      }
+                      error={submitted && !!errors.secretName}
+                      helperText={submitted ? errors.secretName : undefined}
+                    />
+                    <TextField
+                      size="small"
+                      label={Messages.secretKey}
+                      value={values.secretKey}
+                      onChange={(e) => setValues((v) => ({ ...v, secretKey: e.target.value }))}
+                      helperText={Messages.secretKeyHelper}
+                    />
+                  </>
                 )}
               </>
             )}

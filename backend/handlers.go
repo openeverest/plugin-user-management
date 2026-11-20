@@ -83,6 +83,9 @@ type usersResponse struct {
 	// DatabasesSupported tells whether the instance's databases are managed
 	// too, so database-scoped roles are granted on them.
 	DatabasesSupported bool `json:"databasesSupported"`
+	// ExternalCredentialsSupported tells whether InstanceUsers may reference
+	// an existing credential Secret instead of using one managed by the plugin.
+	ExternalCredentialsSupported bool `json:"externalCredentialsSupported"`
 }
 
 type credentialsResponse struct {
@@ -100,8 +103,10 @@ type credentialsResponse struct {
 type createUserRequest struct {
 	Username string `json:"username"`
 	// Generated when empty.
-	Password string             `json:"password"`
-	Roles    []engine.RoleGrant `json:"roles"`
+	Password string `json:"password"`
+	// PasswordSecretRef uses an existing Secret instead of a plugin-owned one.
+	PasswordSecretRef *v1alpha1.SecretKeySelector `json:"passwordSecretRef,omitempty"`
+	Roles             []engine.RoleGrant          `json:"roles"`
 }
 
 type updateRolesRequest struct {
@@ -295,10 +300,11 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := usersResponse{
-		Users:          []userView{},
-		Roles:          a.engine.Roles(),
-		CanManage:      a.canManage,
-		CredentialKind: engine.CredentialKindOf(a.engine),
+		Users:                        []userView{},
+		Roles:                        a.engine.Roles(),
+		CanManage:                    a.canManage,
+		CredentialKind:               engine.CredentialKindOf(a.engine),
+		ExternalCredentialsSupported: engine.ExternalCredentialsSupported(a.engine),
 	}
 	_, noRolesErr := a.engine.NormalizeRoles(nil)
 	resp.RolesRequired = noRolesErr != nil
@@ -360,17 +366,39 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	pwd, err := passwordOrGenerated(a.engine, req.Password)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
 	roles, err := a.engine.NormalizeRoles(req.Roles)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	desired := engine.DesiredUser{Username: req.Username, Roles: roles, ManagedCredentials: true}
+	desired := engine.DesiredUser{
+		Username:           req.Username,
+		Roles:              roles,
+		ManagedCredentials: req.PasswordSecretRef == nil,
+	}
+	var pwd string
+	if req.PasswordSecretRef != nil {
+		if req.Password != "" {
+			writeError(w, badRequest("password and passwordSecretRef are mutually exclusive"))
+			return
+		}
+		req.PasswordSecretRef.Name = strings.TrimSpace(req.PasswordSecretRef.Name)
+		req.PasswordSecretRef.Key = strings.TrimSpace(req.PasswordSecretRef.Key)
+		if req.PasswordSecretRef.Name == "" {
+			writeError(w, badRequest("passwordSecretRef.name is required"))
+			return
+		}
+		desired.Password = engine.SecretKeyRef{
+			Name: req.PasswordSecretRef.Name,
+			Key:  req.PasswordSecretRef.Key,
+		}
+	} else {
+		pwd, err = passwordOrGenerated(a.engine, req.Password)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	if err := a.engine.ValidateUser(desired); err != nil {
 		writeError(w, err)
 		return
@@ -405,12 +433,26 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			Labels:    map[string]string{controller.InstanceLabel: a.target.Instance},
 		},
 		Spec: v1alpha1.InstanceUserSpec{
-			InstanceRef: v1alpha1.InstanceReference{Name: a.target.Instance},
-			Username:    req.Username,
-			Roles:       toAPIGrants(roles),
+			InstanceRef:       v1alpha1.InstanceReference{Name: a.target.Instance},
+			Username:          req.Username,
+			Roles:             toAPIGrants(roles),
+			PasswordSecretRef: req.PasswordSecretRef,
 		},
 	}
-	creds := credentialsResponse{ID: name, Username: req.Username, Password: pwd, Secret: controller.CredentialsSecretName(user)}
+	creds := credentialsResponse{ID: name, Username: req.Username, Password: pwd}
+	if req.PasswordSecretRef == nil {
+		creds.Secret = controller.CredentialsSecretName(user)
+	} else {
+		creds.Secret = req.PasswordSecretRef.Name
+		if err := s.kube.Create(ctx, user); err != nil {
+			writeError(w, err)
+			return
+		}
+		log.Printf("declared user %q on %s/%s as InstanceUser %s with external credentials",
+			req.Username, a.target.Namespace, a.target.Instance, name)
+		writeJSON(w, http.StatusCreated, creds)
+		return
+	}
 	creds.URI, _ = a.engine.ConnectionURI(ctx, a.target, req.Username, pwd)
 	creds.Properties = engine.ConnectionProperties(ctx, a.engine, a.target)
 

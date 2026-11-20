@@ -47,6 +47,40 @@ describe('UserFormDialog', () => {
     });
   });
 
+  it('creates a user that reads credentials from an existing Secret', () => {
+    const onSubmit = vi.fn();
+    render(
+      <UserFormDialog
+        mode="create"
+        roles={roles}
+        externalCredentialsSupported
+        isSubmitting={false}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText(PASSWORD_TERMS.username), { target: { value: 'app' } });
+    selectRole(0, 'readAnyDatabase');
+    fireEvent.click(screen.getByLabelText(Messages.useExistingSecret));
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText(Messages.secretNameRequired)).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText(Messages.secretName), {
+      target: { value: 'app-vault-credentials' },
+    });
+    fireEvent.change(screen.getByLabelText(Messages.secretKey), {
+      target: { value: 'credential' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: Messages.create }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      username: 'app',
+      passwordSecretRef: { name: 'app-vault-credentials', key: 'credential' },
+      roles: [{ role: 'readAnyDatabase' }],
+    });
+  });
+
   it('edits the roles of an existing user', () => {
     const onSubmit = vi.fn();
     render(

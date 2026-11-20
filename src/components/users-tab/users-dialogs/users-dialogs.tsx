@@ -18,6 +18,7 @@ interface UsersDialogsProps {
   target: InstanceTarget;
   roles: Role[];
   rolesRequired?: boolean;
+  externalCredentialsSupported?: boolean;
   // The databases database-scoped roles can be granted on, when managed.
   databases?: string[];
   dialog: UsersDialogState;
@@ -33,6 +34,7 @@ export const UsersDialogs = ({
   target,
   roles,
   rolesRequired,
+  externalCredentialsSupported,
   databases,
   dialog,
   onClose,
@@ -66,6 +68,7 @@ export const UsersDialogs = ({
           mode="create"
           roles={roles}
           rolesRequired={rolesRequired}
+          externalCredentialsSupported={externalCredentialsSupported}
           databases={databases}
           isSubmitting={createUser.isPending}
           error={createUser.error?.message}
@@ -73,7 +76,9 @@ export const UsersDialogs = ({
           onSubmit={(user) =>
             createUser.mutate(user, {
               onSuccess: (credentials) => {
-                setShown({ title: terms.createdTitle(credentials.username), credentials });
+                if (!user.passwordSecretRef) {
+                  setShown({ title: terms.createdTitle(credentials.username), credentials });
+                }
                 close();
               },
             })

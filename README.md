@@ -55,6 +55,12 @@ status:
   `<name>-credentials` with keys `username`, `password` and `uri` (an
   in-cluster connection string). The Secret is owned by the InstanceUser.
   Editing its `password` rotates the password in the database.
+- With `passwordSecretRef`, another controller owns the credential Secret.
+  The plugin reads the selected key and never owns, displays or resets it.
+  It labels the referenced Secret with
+  `plugin-user-management.plugins.openeverest.io/instance: <instance>` so a
+  rotation enqueues the instance, without changing data or adding an owner
+  reference.
 - `Ready` means the user exists in the instance with exactly the declared
   roles. Role changes go back to `Pending` until the engine matches.
   PostgreSQL users may have no roles, such as the owner of an
@@ -78,6 +84,44 @@ See [examples/instanceuser.yaml](examples/instanceuser.yaml) (MongoDB),
 (MariaDB) and
 [examples/instanceuser-kserve.yaml](examples/instanceuser-kserve.yaml)
 (an API key for a model).
+
+### External Secrets Operator
+
+ESO is optional. The plugin does not install it, create its resources, or
+depend on a particular provider. Both directions meet at a Kubernetes Secret:
+
+```text
+external store -> ExternalSecret -> Secret -> passwordSecretRef -> database user
+InstanceUser -> generated Secret -> PushSecret -> external store
+```
+
+For credentials imported from an external store, point `passwordSecretRef`
+at the Secret created by an `ExternalSecret`. The store is authoritative:
+rotate the value there, and the normal ESO refresh updates the database user.
+The plugin labels the Secret for rotation watches; include the same label in
+the ExternalSecret target template as shown in the example.
+
+For plugin-generated credentials, point a `PushSecret` at the generated
+`<InstanceUser name>-credentials` Secret. Push only the keys consumers need
+(usually `username` and `password`), because the Secret can also contain a
+connection string and provider-specific fields.
+
+Keep the flows separate. Do not pull from and push to the same remote path
+through the same local Secret: `PushSecret.updatePolicy: Replace` makes
+Kubernetes authoritative, while `IfNotExists` makes the provider authoritative
+and allows the two values to diverge. A safe starting point for push is
+`updatePolicy: Replace` and `deletionPolicy: None`; choose remote deletion
+explicitly. `PushSecret` remains provider-dependent, so verify provider support.
+
+See [the Vault pull example](examples/eso/pull.yaml) and
+[the AWS Secrets Manager push example](examples/eso/push.yaml). They assume
+the corresponding `SecretStore` already exists in the instance namespace.
+
+Treat ESO resources as secret-management privileges. Restrict who can create
+`PushSecret`, `ExternalSecret`, and `SecretStore` objects, limit provider
+credentials to the required remote paths, and use namespace or admission policy
+to prevent arbitrary stores. This matters when push is enabled because it can
+copy cluster credentials to an external destination.
 
 ## SeaweedFS experiment
 
@@ -700,8 +744,8 @@ permissions as users.
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind, rolesRequired, databasesSupported}` |
-| `POST /api/users` | `{username, password?, roles}` | `201` credentials |
+| `GET /api/users` | | `{users, roles, canManage, databaseError?, credentialKind, rolesRequired, databasesSupported, externalCredentialsSupported}` |
+| `POST /api/users` | `{username, password?, passwordSecretRef?, roles}` | `201` credentials |
 | `PUT /api/users/{id}/roles` | `{roles}` | `204`; the roles replace the user's roles |
 | `GET /api/users/{id}/credentials` | | credentials |
 | `POST /api/users/{id}/password` | `{password?}` | credentials |
@@ -712,6 +756,9 @@ permissions as users.
 | `DELETE /api/databases/{id}` | | `204`; with `&drop=true` the database is dropped, otherwise kept |
 
 Credentials are `{id, username, password, uri?, secret, properties?}`;
+For an externally managed credential, the create response leaves `password`,
+`uri` and `properties` empty because the plugin does not read the credential
+for display. `password` and `passwordSecretRef` are mutually exclusive.
 `properties` holds further connection details such as `model`. `roles` are
 `[{role, database?}]`; `database` is only set for database-scoped roles. An
 empty `password` is generated (24 letters and digits). When `credentialKind`

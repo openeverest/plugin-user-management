@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -169,6 +170,10 @@ func (f *fakeS3Engine) CredentialKind() engine.CredentialKind {
 	return engine.CredentialS3
 }
 
+func (f *fakeS3Engine) ExternalCredentialsSupported() bool {
+	return false
+}
+
 func (f *fakeS3Engine) PrepareCredentialSecret(
 	_ context.Context,
 	_ engine.Target,
@@ -272,6 +277,9 @@ func TestListMergesDeclaredAndInstanceUsers(t *testing.T) {
 	if resp.CanManage || len(resp.Roles) != 2 {
 		t.Errorf("response = %+v", resp)
 	}
+	if !resp.ExternalCredentialsSupported {
+		t.Error("database engine should support external credentials")
+	}
 	if strings.Contains(rec.Body.String(), "admin-secret") {
 		t.Error("instance credentials leaked")
 	}
@@ -324,6 +332,38 @@ func TestCreateUserDeclaresInstanceUser(t *testing.T) {
 	}
 }
 
+func TestCreateUserReferencesExternalCredentials(t *testing.T) {
+	env := newTestEnv(t, "percona-server-mongodb", http.StatusOK, http.StatusOK)
+	rec := env.do(
+		http.MethodPost,
+		"/api/users"+testQuery,
+		`{"username":"app","passwordSecretRef":{"name":"external-app","key":"credential"},"roles":[{"role":"read","database":"shop"}]}`,
+	)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	var creds credentialsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &creds); err != nil {
+		t.Fatal(err)
+	}
+	users := env.instanceUsers()
+	if len(users) != 1 || users[0].Spec.PasswordSecretRef == nil {
+		t.Fatalf("InstanceUsers = %+v", users)
+	}
+	ref := users[0].Spec.PasswordSecretRef
+	if ref.Name != "external-app" || ref.Key != "credential" || creds.Password != "" || creds.Secret != ref.Name {
+		t.Fatalf("ref = %+v, response = %+v", ref, creds)
+	}
+	secret := &corev1.Secret{}
+	err := env.kube.Get(context.Background(), types.NamespacedName{
+		Namespace: "ns",
+		Name:      users[0].Name + "-credentials",
+	}, secret)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("generated credentials Secret unexpectedly exists: %v", err)
+	}
+}
+
 func TestCreateS3UserPreparesAccessKey(t *testing.T) {
 	env := newTestEnv(t, s3Provider, http.StatusOK, http.StatusOK)
 	rec := env.do(
@@ -356,6 +396,9 @@ func TestCreateS3UserPreparesAccessKey(t *testing.T) {
 	if usersResp.CredentialKind != engine.CredentialS3 {
 		t.Fatalf("credential kind = %q", usersResp.CredentialKind)
 	}
+	if usersResp.ExternalCredentialsSupported {
+		t.Fatal("S3 credentials should remain plugin-managed")
+	}
 }
 
 func TestCreateUserRejects(t *testing.T) {
@@ -363,13 +406,15 @@ func TestCreateUserRejects(t *testing.T) {
 		body string
 		want int
 	}{
-		"bad username":        {`{"username":"-x","roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
-		"short password":      {`{"username":"x","password":"short","roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
-		"ungrantable role":    {`{"username":"x","roles":[{"role":"root"}]}`, http.StatusBadRequest},
-		"reserved username":   {`{"username":"reserved","roles":[{"role":"readAnyDatabase"}]}`, http.StatusBadRequest},
-		"already declared":    {`{"username":"app","roles":[{"role":"read","database":"a"}]}`, http.StatusConflict},
-		"exists in database":  {`{"username":"boss","roles":[{"role":"read","database":"a"}]}`, http.StatusConflict},
-		"unknown body fields": {`{"username":"x","roles":[],"extra":1}`, http.StatusBadRequest},
+		"bad username":          {`{"username":"-x","roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
+		"short password":        {`{"username":"x","password":"short","roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
+		"two password sources":  {`{"username":"x","password":"long-enough","passwordSecretRef":{"name":"external"},"roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
+		"empty external Secret": {`{"username":"x","passwordSecretRef":{"name":" "},"roles":[{"role":"read","database":"a"}]}`, http.StatusBadRequest},
+		"ungrantable role":      {`{"username":"x","roles":[{"role":"root"}]}`, http.StatusBadRequest},
+		"reserved username":     {`{"username":"reserved","roles":[{"role":"readAnyDatabase"}]}`, http.StatusBadRequest},
+		"already declared":      {`{"username":"app","roles":[{"role":"read","database":"a"}]}`, http.StatusConflict},
+		"exists in database":    {`{"username":"boss","roles":[{"role":"read","database":"a"}]}`, http.StatusConflict},
+		"unknown body fields":   {`{"username":"x","roles":[],"extra":1}`, http.StatusBadRequest},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

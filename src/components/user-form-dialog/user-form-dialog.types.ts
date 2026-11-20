@@ -8,8 +8,11 @@ export interface RoleGrantDraft {
 
 export interface UserFormValues {
   username: string;
+  credentialSource?: 'generated' | 'secret';
   // Empty means "generate one".
   password: string;
+  secretName?: string;
+  secretKey?: string;
   roles: RoleGrantDraft[];
 }
 
@@ -22,6 +25,7 @@ export interface RoleGrantErrors {
 export interface UserFormErrors {
   username?: string;
   password?: string;
+  secretName?: string;
   roles?: string;
   roleRows: RoleGrantErrors[];
 }

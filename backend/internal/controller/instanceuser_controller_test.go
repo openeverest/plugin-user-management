@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,7 +364,11 @@ func TestKeepsChosenPassword(t *testing.T) {
 func TestOwnPasswordSecretIsNotTouched(t *testing.T) {
 	u := dbUser("app", "app", readShop)
 	u.Spec.PasswordSecretRef = &v1alpha1.SecretKeySelector{Name: "my-secret", Key: "pw"}
-	h := newHarness(t, instance("percona-server-mongodb"), u)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-secret", Namespace: ns},
+		Data:       map[string][]byte{"pw": []byte("secret")},
+	}
+	h := newHarness(t, instance("percona-server-mongodb"), u, secret)
 	h.reconcile()
 	if got := h.engine.synced[0][0].Password; got != (engine.SecretKeyRef{Name: "my-secret", Key: "pw"}) {
 		t.Errorf("password ref = %+v", got)
@@ -374,6 +379,35 @@ func TestOwnPasswordSecretIsNotTouched(t *testing.T) {
 	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "app-credentials"}, &corev1.Secret{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("generated a Secret for a user with its own: %v", err)
+	}
+	live := h.secret("my-secret")
+	if live.Labels[InstanceLabel] != "mongo" {
+		t.Errorf("external credentials Secret labels = %+v", live.Labels)
+	}
+	if len(live.OwnerReferences) != 0 || string(live.Data["pw"]) != "secret" {
+		t.Errorf("external credentials Secret was claimed or changed: %+v", live)
+	}
+}
+
+func TestOwnPasswordSecretCannotBelongToAnotherInstance(t *testing.T) {
+	u := dbUser("app", "app", readShop)
+	u.Spec.PasswordSecretRef = &v1alpha1.SecretKeySelector{Name: "my-secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-secret",
+			Namespace: ns,
+			Labels:    map[string]string{InstanceLabel: "another-instance"},
+		},
+	}
+	h := newHarness(t, instance("percona-server-mongodb"), u, secret)
+	h.reconcile()
+
+	if got := h.get("app").Status; got.Phase != v1alpha1.PhaseFailed ||
+		!strings.Contains(got.Message, `already belongs to instance "another-instance"`) {
+		t.Fatalf("status = %+v", got)
+	}
+	if len(h.engine.synced) != 1 || len(h.engine.synced[0]) != 0 {
+		t.Fatalf("synced users = %+v", h.engine.synced)
 	}
 }
 

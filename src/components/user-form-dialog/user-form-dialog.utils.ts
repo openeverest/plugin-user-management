@@ -29,7 +29,14 @@ export const initialFormValues = (
   } else if (rolesRequired && roles.length === 1) {
     rows = [{ ...EMPTY_ROLE_GRANT, role: roles[0].name }];
   }
-  return { username: '', password: '', roles: rows };
+  return {
+    username: '',
+    credentialSource: 'generated',
+    password: '',
+    secretName: '',
+    secretKey: '',
+    roles: rows,
+  };
 };
 
 // Scoped roles can be granted repeatedly on different databases or buckets;
@@ -79,9 +86,15 @@ export const validateUserForm = (
     if (!values.username.trim()) {
       errors.username = Messages.usernameRequired;
     }
-    const { length } = values.password;
-    if (length > 0 && (length < PASSWORD_MIN_LENGTH || length > PASSWORD_MAX_LENGTH)) {
-      errors.password = Messages.passwordLength(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH);
+    if (values.credentialSource === 'secret') {
+      if (!values.secretName?.trim()) {
+        errors.secretName = Messages.secretNameRequired;
+      }
+    } else {
+      const { length } = values.password;
+      if (length > 0 && (length < PASSWORD_MIN_LENGTH || length > PASSWORD_MAX_LENGTH)) {
+        errors.password = Messages.passwordLength(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH);
+      }
     }
   }
   if (rolesRequired && values.roles.length === 0) {

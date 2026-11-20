@@ -1,6 +1,14 @@
 export const Messages = {
   editRolesTitle: (username: string) => `Edit roles of ${username}`,
   passwordHelper: 'Leave empty to generate a strong password.',
+  credentialSource: 'Credential source',
+  generateCredential: 'Generate in OpenEverest',
+  useExistingSecret: 'Use an existing Kubernetes Secret',
+  secretName: 'Secret name',
+  secretKey: 'Secret key',
+  secretKeyHelper: 'Defaults to password.',
+  externalSecretHelper:
+    'Use this for a Secret materialized by External Secrets Operator or another controller. OpenEverest will apply the credential when this Secret changes.',
   roles: 'Roles',
   role: 'Role',
   database: 'Database',
@@ -13,6 +21,7 @@ export const Messages = {
   create: 'Create',
   save: 'Save',
   usernameRequired: 'Enter a username.',
+  secretNameRequired: 'Enter the name of the Secret.',
   passwordLength: (min: number, max: number) =>
     `Use ${min} to ${max} characters, or leave empty to generate one.`,
   rolesRequired: 'Grant at least one role.',

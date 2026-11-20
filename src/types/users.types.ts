@@ -43,6 +43,8 @@ export interface UsersResponse {
   rolesRequired?: boolean;
   // True when database-scoped roles are granted on the instance's managed databases.
   databasesSupported?: boolean;
+  // False for engines whose credential format cannot safely use passwordSecretRef.
+  externalCredentialsSupported?: boolean;
 }
 
 export interface Credentials {
@@ -59,6 +61,10 @@ export interface Credentials {
 export interface NewUser {
   username: string;
   password?: string;
+  passwordSecretRef?: {
+    name: string;
+    key?: string;
+  };
   roles: RoleGrant[];
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"time"
 
@@ -221,6 +222,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			s.fail(err.Error())
 			continue
 		}
+		if u.Spec.PasswordSecretRef != nil {
+			if err := r.ensureExternalCredentialsLabel(ctx, target, u.Spec.PasswordSecretRef.Name); err != nil {
+				s.fail(err.Error())
+				continue
+			}
+		}
 		if usernames[u.Spec.Username] {
 			s.fail(fmt.Sprintf("another InstanceUser already declares user %q on this instance", u.Spec.Username))
 			continue
@@ -254,6 +261,40 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 	return withResync(result, eng, len(states) > 0), nil
+}
+
+// ensureExternalCredentialsLabel keeps an externally owned Secret in the
+// controller's filtered Secret cache, so edits to it enqueue the instance.
+func (r *Reconciler) ensureExternalCredentialsLabel(ctx context.Context, target engine.Target, name string) error {
+	reader := r.Reader
+	if reader == nil {
+		reader = r.Client
+	}
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: target.Namespace, Name: name}
+	if err := reader.Get(ctx, key, secret); err != nil {
+		// The Secret may still be materializing. Engine reconciliation reports
+		// it as pending; once it appears, a pending requeue will label it.
+		return client.IgnoreNotFound(err)
+	}
+	labels := secret.GetLabels()
+	if labels[InstanceLabel] == target.Instance {
+		return nil
+	}
+	if instance := labels[InstanceLabel]; instance != "" {
+		return fmt.Errorf("credentials Secret %q already belongs to instance %q", name, instance)
+	}
+	orig := secret.DeepCopy()
+	labels = maps.Clone(labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[InstanceLabel] = target.Instance
+	secret.SetLabels(labels)
+	if err := r.Client.Patch(ctx, secret, client.MergeFrom(orig)); err != nil {
+		return fmt.Errorf("label credentials Secret %q for rotation: %w", name, err)
+	}
+	return nil
 }
 
 // declarableRoles leaves out the roles granted on databases whose

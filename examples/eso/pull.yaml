@@ -1,0 +1,40 @@
+---
+# Assumes a SecretStore named "vault" with a policy limited to this path.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: orders-service-credentials
+  namespace: team-a
+spec:
+  refreshInterval: 5m
+  secretStoreRef:
+    name: vault
+    kind: SecretStore
+  target:
+    name: orders-service-password
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          plugin-user-management.plugins.openeverest.io/instance: orders-db
+  data:
+    - secretKey: password
+      remoteRef:
+        key: database/production/orders-service
+        property: password
+---
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceUser
+metadata:
+  name: orders-service
+  namespace: team-a
+spec:
+  instanceRef:
+    name: orders-db
+  username: orders_svc
+  roles:
+    - role: readWrite
+      database: orders
+  passwordSecretRef:
+    name: orders-service-password
+    key: password

@@ -165,6 +165,19 @@ type CredentialKindProvider interface {
 	CredentialKind() CredentialKind
 }
 
+// ExternalCredentialsProvider reports whether an engine accepts credentials
+// from a Secret it does not own.
+type ExternalCredentialsProvider interface {
+	ExternalCredentialsSupported() bool
+}
+
+// ExternalCredentialsSupported reports whether the engine accepts a
+// passwordSecretRef. Engines support external credentials unless they opt out.
+func ExternalCredentialsSupported(e Engine) bool {
+	provider, ok := e.(ExternalCredentialsProvider)
+	return !ok || provider.ExternalCredentialsSupported()
+}
+
 // CredentialSecretPreparer is implemented by engines that need another field
 // in a plugin-owned credential Secret, such as an S3 access key ID. The
 // function may add fields but must preserve fields it does not own.

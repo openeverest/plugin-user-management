@@ -1,0 +1,42 @@
+---
+# OpenEverest owns this generated Secret.
+apiVersion: plugin-user-management.plugins.openeverest.io/v1alpha1
+kind: InstanceUser
+metadata:
+  name: orders-service
+  namespace: team-a
+spec:
+  instanceRef:
+    name: orders-db
+  username: orders_svc
+  roles:
+    - role: readWrite
+      database: orders
+---
+# Assumes a push-capable AWS Secrets Manager SecretStore named "aws" exists.
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: orders-service-to-vault
+  namespace: team-a
+spec:
+  updatePolicy: Replace
+  deletionPolicy: None
+  refreshInterval: 5m
+  secretStoreRefs:
+    - name: aws
+      kind: SecretStore
+  selector:
+    secret:
+      name: orders-service-credentials
+  data:
+    - match:
+        secretKey: username
+        remoteRef:
+          remoteKey: openeverest/production/orders-service
+          property: username
+    - match:
+        secretKey: password
+        remoteRef:
+          remoteKey: openeverest/production/orders-service
+          property: password
