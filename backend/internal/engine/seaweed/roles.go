@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	seaweedv1 "github.com/seaweedfs/seaweedfs-operator/api/v1"
+
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
 )
 
@@ -91,17 +93,17 @@ func validBucketName(name string) bool {
 		net.ParseIP(name) == nil
 }
 
-func policyStatements(grant engine.RoleGrant) []any {
+func policyStatements(grant engine.RoleGrant) []seaweedv1.S3PolicyStatement {
 	bucket := grant.Bucket
 	objects := bucket + "/*"
 	switch grant.Role {
 	case RoleRead:
-		return []any{
+		return []seaweedv1.S3PolicyStatement{
 			statement([]string{"s3:ListBucket"}, []string{bucket}),
 			statement([]string{"s3:GetObject", "s3:GetObjectVersion"}, []string{objects}),
 		}
 	case RoleReadWrite:
-		return []any{
+		return []seaweedv1.S3PolicyStatement{
 			statement([]string{"s3:ListBucket"}, []string{bucket}),
 			statement([]string{
 				"s3:GetObject",
@@ -113,22 +115,16 @@ func policyStatements(grant engine.RoleGrant) []any {
 			}, []string{objects}),
 		}
 	default:
-		return []any{statement([]string{"s3:*"}, []string{bucket, objects})}
+		return []seaweedv1.S3PolicyStatement{
+			statement([]string{"s3:*"}, []string{bucket, objects}),
+		}
 	}
 }
 
-func statement(actions, resources []string) map[string]any {
-	return map[string]any{
-		"effect":    "Allow",
-		"actions":   toAny(actions),
-		"resources": toAny(resources),
+func statement(actions, resources []string) seaweedv1.S3PolicyStatement {
+	return seaweedv1.S3PolicyStatement{
+		Effect:    seaweedv1.S3PolicyEffectAllow,
+		Actions:   actions,
+		Resources: resources,
 	}
-}
-
-func toAny(values []string) []any {
-	out := make([]any, len(values))
-	for i := range values {
-		out[i] = values[i]
-	}
-	return out
 }

@@ -14,6 +14,7 @@ const SUPPORTED_PROVIDERS = [
   'provider-altinity-clickhouse',
   'altinity-clickhouse',
   'provider-kserve',
+  'provider-seaweedfs',
   'mssql',
   'mariadb',
   'percona-xtradb-cluster',

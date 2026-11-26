@@ -5,7 +5,7 @@
 # Runs on the build machine's platform and cross-compiles for the target:
 # building arm64 under QEMU emulation takes over 20 minutes.
 # ──────────────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS backend-builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS backend-builder
 
 ARG TARGETOS
 ARG TARGETARCH

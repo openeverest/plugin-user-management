@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	seaweedv1 "github.com/seaweedfs/seaweedfs-operator/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -111,15 +113,27 @@ func randomAccessKey() (string, error) {
 	return string(out), nil
 }
 
-func (e *Engine) SyncUsers(ctx context.Context, target engine.Target, users []engine.DesiredUser) error {
-	seaweed, err := e.dyn.Resource(seaweedResource).Namespace(target.Namespace).Get(
+func (e *Engine) getSeaweed(ctx context.Context, target engine.Target) (*seaweedv1.Seaweed, error) {
+	obj, err := e.dyn.Resource(seaweedResource).Namespace(target.Namespace).Get(
 		ctx, target.Instance, metav1.GetOptions{},
 	)
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("%w: Seaweed cluster is not found", engine.ErrNotReady)
+		return nil, fmt.Errorf("%w: Seaweed cluster is not found", engine.ErrNotReady)
 	}
 	if err != nil {
-		return fmt.Errorf("get Seaweed cluster: %w", err)
+		return nil, fmt.Errorf("get Seaweed cluster: %w", err)
+	}
+	seaweed := &seaweedv1.Seaweed{}
+	if err := fromUnstructured(obj, seaweed); err != nil {
+		return nil, fmt.Errorf("decode Seaweed cluster: %w", err)
+	}
+	return seaweed, nil
+}
+
+func (e *Engine) SyncUsers(ctx context.Context, target engine.Target, users []engine.DesiredUser) error {
+	seaweed, err := e.getSeaweed(ctx, target)
+	if err != nil {
+		return err
 	}
 
 	desiredGrants := map[string]bool{}
@@ -144,26 +158,24 @@ func (e *Engine) SyncUsers(ctx context.Context, target engine.Target, users []en
 		}
 		e.problems.Delete(key)
 
-		identity, err := e.apply(ctx, identityResource, identityObject(target, seaweed, user.Username))
+		identity, err := e.applyIdentity(ctx, identityObject(target, seaweed, user.Username))
 		if err != nil {
 			return err
 		}
-		desiredIdentities[identity.GetName()] = true
-		_, err = e.apply(ctx, credentialResource, credentialsObject(target, identity, user))
-		if err != nil {
+		desiredIdentities[identity.Name] = true
+		if _, err := e.applyCredentials(ctx, credentialsObject(target, identity, user)); err != nil {
 			return err
 		}
 
 		for _, grant := range user.Roles {
-			policy, err := e.apply(ctx, policyResource, policyObject(target, identity, grant))
+			policy, err := e.applyPolicy(ctx, policyObject(target, identity, grant))
 			if err != nil {
 				return err
 			}
-			_, err = e.apply(ctx, bindingResource, bindingObject(target, identity, grant, policy))
-			if err != nil {
+			if _, err := e.applyBinding(ctx, bindingObject(target, identity, grant, policy)); err != nil {
 				return err
 			}
-			desiredGrants[policy.GetName()] = true
+			desiredGrants[policy.Name] = true
 			desiredGrants[bindingName(target, user.Username, grant)] = true
 		}
 		if problem := e.userProblem(ctx, target, user.Username); problem != "" {
@@ -218,38 +230,100 @@ func (e *Engine) credentialsSecret(
 func (e *Engine) apply(
 	ctx context.Context,
 	gvr schema.GroupVersionResource,
-	obj *unstructured.Unstructured,
+	obj runtime.Object,
 ) (*unstructured.Unstructured, error) {
-	resource := e.dyn.Resource(gvr).Namespace(obj.GetNamespace())
-	existing, err := resource.Get(ctx, obj.GetName(), metav1.GetOptions{})
+	desired, err := toUnstructured(obj)
+	if err != nil {
+		return nil, fmt.Errorf("encode %T: %w", obj, err)
+	}
+	resource := e.dyn.Resource(gvr).Namespace(desired.GetNamespace())
+	existing, err := resource.Get(ctx, desired.GetName(), metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
 	case err != nil:
-		return nil, fmt.Errorf("get %s %q: %w", obj.GetKind(), obj.GetName(), err)
-	case !isManaged(existing) || existing.GetLabels()[instanceLabel] != obj.GetLabels()[instanceLabel]:
-		return nil, fmt.Errorf("%s %q exists and is not managed by the plugin", obj.GetKind(), obj.GetName())
+		return nil, fmt.Errorf("get %s %q: %w", desired.GetKind(), desired.GetName(), err)
+	case !isManaged(existing) || existing.GetLabels()[instanceLabel] != desired.GetLabels()[instanceLabel]:
+		return nil, fmt.Errorf("%s %q exists and is not managed by the plugin", desired.GetKind(), desired.GetName())
 	}
-	applied, err := resource.Apply(ctx, obj.GetName(), obj, metav1.ApplyOptions{
+	applied, err := resource.Apply(ctx, desired.GetName(), desired, metav1.ApplyOptions{
 		FieldManager: FieldManager,
 		Force:        true,
 	})
 	if apierrors.IsNotFound(err) {
-		return resource.Create(ctx, obj, metav1.CreateOptions{FieldManager: FieldManager})
+		return resource.Create(ctx, desired, metav1.CreateOptions{FieldManager: FieldManager})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("apply %s %q: %w", obj.GetKind(), obj.GetName(), err)
+		return nil, fmt.Errorf("apply %s %q: %w", desired.GetKind(), desired.GetName(), err)
 	}
 	return applied, nil
 }
 
+func (e *Engine) applyIdentity(ctx context.Context, desired *seaweedv1.S3Identity) (*seaweedv1.S3Identity, error) {
+	applied, err := e.apply(ctx, identityResource, desired)
+	if err != nil {
+		return nil, err
+	}
+	out := &seaweedv1.S3Identity{}
+	if err := fromUnstructured(applied, out); err != nil {
+		return nil, fmt.Errorf("decode S3Identity %q: %w", desired.Name, err)
+	}
+	return out, nil
+}
+
+func (e *Engine) applyCredentials(ctx context.Context, desired *seaweedv1.S3Credentials) (*seaweedv1.S3Credentials, error) {
+	applied, err := e.apply(ctx, credentialResource, desired)
+	if err != nil {
+		return nil, err
+	}
+	out := &seaweedv1.S3Credentials{}
+	if err := fromUnstructured(applied, out); err != nil {
+		return nil, fmt.Errorf("decode S3Credentials %q: %w", desired.Name, err)
+	}
+	return out, nil
+}
+
+func (e *Engine) applyPolicy(ctx context.Context, desired *seaweedv1.S3Policy) (*seaweedv1.S3Policy, error) {
+	applied, err := e.apply(ctx, policyResource, desired)
+	if err != nil {
+		return nil, err
+	}
+	out := &seaweedv1.S3Policy{}
+	if err := fromUnstructured(applied, out); err != nil {
+		return nil, fmt.Errorf("decode S3Policy %q: %w", desired.Name, err)
+	}
+	return out, nil
+}
+
+func (e *Engine) applyBinding(ctx context.Context, desired *seaweedv1.S3PolicyBinding) (*seaweedv1.S3PolicyBinding, error) {
+	applied, err := e.apply(ctx, bindingResource, desired)
+	if err != nil {
+		return nil, err
+	}
+	out := &seaweedv1.S3PolicyBinding{}
+	if err := fromUnstructured(applied, out); err != nil {
+		return nil, fmt.Errorf("decode S3PolicyBinding %q: %w", desired.Name, err)
+	}
+	return out, nil
+}
+
+func (e *Engine) applyBucket(ctx context.Context, desired *seaweedv1.Bucket) (*seaweedv1.Bucket, error) {
+	applied, err := e.apply(ctx, bucketResource, desired)
+	if err != nil {
+		return nil, err
+	}
+	out := &seaweedv1.Bucket{}
+	if err := fromUnstructured(applied, out); err != nil {
+		return nil, fmt.Errorf("decode Bucket %q: %w", desired.Name, err)
+	}
+	return out, nil
+}
+
 func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.User, error) {
-	if _, err := e.dyn.Resource(seaweedResource).Namespace(target.Namespace).Get(ctx, target.Instance, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("%w: Seaweed cluster is not found", engine.ErrNotReady)
-	} else if err != nil {
-		return nil, fmt.Errorf("get Seaweed cluster: %w", err)
+	if _, err := e.getSeaweed(ctx, target); err != nil {
+		return nil, err
 	}
 
-	identities, err := e.dyn.Resource(identityResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{})
+	list, err := e.dyn.Resource(identityResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list S3Identity resources: %w", err)
 	}
@@ -257,9 +331,12 @@ func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.
 	if err != nil {
 		return nil, err
 	}
-	users := make([]engine.User, 0, len(identities.Items))
-	for i := range identities.Items {
-		identity := &identities.Items[i]
+	users := make([]engine.User, 0, len(list.Items))
+	for i := range list.Items {
+		identity := &seaweedv1.S3Identity{}
+		if err := fromUnstructured(&list.Items[i], identity); err != nil {
+			return nil, fmt.Errorf("decode S3Identity: %w", err)
+		}
 		if !matchingIdentity(identity, target) {
 			continue
 		}
@@ -269,7 +346,7 @@ func (e *Engine) ListUsers(ctx context.Context, target engine.Target) ([]engine.
 		}
 		users = append(users, engine.User{
 			Username: username,
-			Roles:    grants[identity.GetName()],
+			Roles:    grants[identity.Name],
 			System:   username == "admin" || username == "anonymous",
 		})
 	}
@@ -290,12 +367,8 @@ func (e *Engine) ValidateBucket(name string) error {
 // Bucket CRs are visible; buckets created directly in SeaweedFS without a CR
 // are not discoverable through Kubernetes.
 func (e *Engine) ListBuckets(ctx context.Context, target engine.Target) ([]engine.Bucket, error) {
-	if _, err := e.dyn.Resource(seaweedResource).Namespace(target.Namespace).Get(
-		ctx, target.Instance, metav1.GetOptions{},
-	); apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("%w: Seaweed cluster is not found", engine.ErrNotReady)
-	} else if err != nil {
-		return nil, fmt.Errorf("get Seaweed cluster: %w", err)
+	if _, err := e.getSeaweed(ctx, target); err != nil {
+		return nil, err
 	}
 	list, err := e.dyn.Resource(bucketResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -307,15 +380,18 @@ func (e *Engine) ListBuckets(ctx context.Context, target engine.Target) ([]engin
 	}
 	buckets := make([]engine.Bucket, 0, len(list.Items))
 	for i := range list.Items {
-		obj := &list.Items[i]
-		if !matchingBucket(obj, target) {
+		bucket := &seaweedv1.Bucket{}
+		if err := fromUnstructured(&list.Items[i], bucket); err != nil {
+			return nil, fmt.Errorf("decode Bucket: %w", err)
+		}
+		if !matchingBucket(bucket, target) {
 			continue
 		}
-		name, _, _ := unstructured.NestedString(obj.Object, "spec", "name")
+		name := bucket.Spec.Name
 		if name == "" {
-			name = obj.GetName()
+			name = bucket.Name
 		}
-		owner, _, _ := unstructured.NestedString(obj.Object, "status", "ownerIdentity")
+		owner := bucket.Status.OwnerIdentity
 		if visible := owners[owner]; visible != "" {
 			owner = visible
 		}
@@ -332,11 +408,17 @@ func (e *Engine) identityDisplayNames(ctx context.Context, target engine.Target)
 	}
 	owners := map[string]string{}
 	for i := range list.Items {
-		identity := &list.Items[i]
+		identity := &seaweedv1.S3Identity{}
+		if err := fromUnstructured(&list.Items[i], identity); err != nil {
+			return nil, fmt.Errorf("decode S3Identity: %w", err)
+		}
 		if !matchingIdentity(identity, target) {
 			continue
 		}
-		iamName, _, _ := unstructured.NestedString(identity.Object, "spec", "name")
+		iamName := identity.Spec.Name
+		if iamName == "" {
+			iamName = identity.Name
+		}
 		owners[iamName] = identityUsername(identity)
 	}
 	return owners, nil
@@ -345,27 +427,24 @@ func (e *Engine) identityDisplayNames(ctx context.Context, target engine.Target)
 // SyncBucket implements engine.BucketEngine using the SeaweedFS operator's
 // native Bucket CR.
 func (e *Engine) SyncBucket(ctx context.Context, target engine.Target, bucket engine.DesiredBucket) error {
-	seaweed, err := e.dyn.Resource(seaweedResource).Namespace(target.Namespace).Get(
-		ctx, target.Instance, metav1.GetOptions{},
-	)
-	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("%w: Seaweed cluster is not found", engine.ErrNotReady)
-	}
+	seaweed, err := e.getSeaweed(ctx, target)
 	if err != nil {
-		return fmt.Errorf("get Seaweed cluster: %w", err)
+		return err
 	}
 	desired := bucketObject(target, seaweed, bucket)
 	resource := e.dyn.Resource(bucketResource).Namespace(target.Namespace)
-	existing, err := resource.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	existingObj, err := resource.Get(ctx, desired.Name, metav1.GetOptions{})
 	switch {
 	case err == nil:
-		if !isManaged(existing) || existing.GetLabels()[instanceLabel] != target.Instance {
-			return fmt.Errorf("Bucket %q exists and is not managed by the plugin", desired.GetName())
+		if !isManaged(existingObj) || existingObj.GetLabels()[instanceLabel] != target.Instance {
+			return fmt.Errorf("Bucket %q exists and is not managed by the plugin", desired.Name)
 		}
-		desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
-		existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
-		if reflect.DeepEqual(existingSpec, desiredSpec) {
-			if problem := readyProblem(existing); problem != "" {
+		existing := &seaweedv1.Bucket{}
+		if err := fromUnstructured(existingObj, existing); err != nil {
+			return fmt.Errorf("decode Bucket %q: %w", desired.Name, err)
+		}
+		if reflect.DeepEqual(existing.Spec, desired.Spec) {
+			if problem := bucketReadyProblem(existing); problem != "" {
 				if bucketAlreadyExists(existing) {
 					return fmt.Errorf("%w: %s", engine.ErrInvalid, problem)
 				}
@@ -375,13 +454,13 @@ func (e *Engine) SyncBucket(ctx context.Context, target engine.Target, bucket en
 		}
 	case apierrors.IsNotFound(err):
 	case err != nil:
-		return fmt.Errorf("get Bucket %q: %w", desired.GetName(), err)
+		return fmt.Errorf("get Bucket %q: %w", desired.Name, err)
 	}
-	applied, err := e.apply(ctx, bucketResource, desired)
+	applied, err := e.applyBucket(ctx, desired)
 	if err != nil {
 		return err
 	}
-	if problem := readyProblem(applied); problem != "" {
+	if problem := bucketReadyProblem(applied); problem != "" {
 		if bucketAlreadyExists(applied) {
 			return fmt.Errorf("%w: %s", engine.ErrInvalid, problem)
 		}
@@ -405,22 +484,29 @@ func (e *Engine) ReleaseBucket(ctx context.Context, target engine.Target, name s
 	if !isManaged(obj) || obj.GetLabels()[instanceLabel] != target.Instance {
 		return fmt.Errorf("Bucket %q is not managed by the plugin", resourceName)
 	}
-	policy := "Retain"
-	if drop {
-		policy = "Delete"
+	bucket := &seaweedv1.Bucket{}
+	if err := fromUnstructured(obj, bucket); err != nil {
+		return fmt.Errorf("decode Bucket %q: %w", resourceName, err)
 	}
-	current, _, _ := unstructured.NestedString(obj.Object, "spec", "reclaimPolicy")
-	if current != policy && obj.GetDeletionTimestamp() == nil {
-		obj = obj.DeepCopy()
-		if err := unstructured.SetNestedField(obj.Object, policy, "spec", "reclaimPolicy"); err != nil {
-			return err
+	policy := seaweedv1.BucketReclaimRetain
+	if drop {
+		policy = seaweedv1.BucketReclaimDelete
+	}
+	if bucket.Spec.ReclaimPolicy != policy && bucket.DeletionTimestamp == nil {
+		bucket.Spec.ReclaimPolicy = policy
+		updated, err := toUnstructured(bucket)
+		if err != nil {
+			return fmt.Errorf("encode Bucket %q: %w", resourceName, err)
 		}
-		obj, err = resource.Update(ctx, obj, metav1.UpdateOptions{})
+		obj, err = resource.Update(ctx, updated, metav1.UpdateOptions{})
 		if err != nil {
 			return fmt.Errorf("set Bucket reclaim policy: %w", err)
 		}
+		if err := fromUnstructured(obj, bucket); err != nil {
+			return fmt.Errorf("decode Bucket %q: %w", resourceName, err)
+		}
 	}
-	if obj.GetDeletionTimestamp() == nil {
+	if bucket.DeletionTimestamp == nil {
 		if err := resource.Delete(ctx, resourceName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete Bucket %q: %w", resourceName, err)
 		}
@@ -429,21 +515,21 @@ func (e *Engine) ReleaseBucket(ctx context.Context, target engine.Target, name s
 }
 
 func (e *Engine) bucketGrants(ctx context.Context, target engine.Target) (map[string][]engine.RoleGrant, error) {
-	bindings, err := e.dyn.Resource(bindingResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{
+	list, err := e.dyn.Resource(bindingResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: managedByLabel + "=" + managedBy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list S3PolicyBindings: %w", err)
 	}
 	grants := map[string][]engine.RoleGrant{}
-	for i := range bindings.Items {
-		binding := &bindings.Items[i]
+	for i := range list.Items {
+		binding := &list.Items[i]
 		if binding.GetLabels()[instanceLabel] != target.Instance {
 			continue
 		}
 		annotations := binding.GetAnnotations()
 		grant := engine.RoleGrant{Role: annotations[roleAnnotation], Bucket: annotations[bucketAnnotation]}
-		identity := binding.GetAnnotations()[identityAnnotation]
+		identity := annotations[identityAnnotation]
 		if grant.Role != "" && grant.Bucket != "" && identity != "" {
 			grants[identity] = append(grants[identity], grant)
 		}
@@ -462,49 +548,50 @@ func (e *Engine) bucketGrants(ctx context.Context, target engine.Target) (map[st
 
 func (e *Engine) DropUser(ctx context.Context, target engine.Target, username string) error {
 	name := identityName(target, username)
-	buckets, err := e.dyn.Resource(bucketResource).Namespace(metav1.NamespaceAll).List(
+	list, err := e.dyn.Resource(bucketResource).Namespace(metav1.NamespaceAll).List(
 		ctx, metav1.ListOptions{},
 	)
 	if err != nil {
 		return fmt.Errorf("list buckets before dropping S3 user: %w", err)
 	}
-	for i := range buckets.Items {
-		bucket := &buckets.Items[i]
+	for i := range list.Items {
+		bucket := &seaweedv1.Bucket{}
+		if err := fromUnstructured(&list.Items[i], bucket); err != nil {
+			return fmt.Errorf("decode Bucket: %w", err)
+		}
 		if !matchingBucket(bucket, target) {
 			continue
 		}
-		owner, _, _ := unstructured.NestedString(bucket.Object, "spec", "owner")
-		if owner == name {
-			return fmt.Errorf("%w: bucket %q is still owned by user %q", engine.ErrInProgress, matchingBucketName(bucket), username)
+		if bucket.Spec.Owner == name {
+			bucketName := bucket.Spec.Name
+			if bucketName == "" {
+				bucketName = bucket.Name
+			}
+			return fmt.Errorf("%w: bucket %q is still owned by user %q", engine.ErrInProgress, bucketName, username)
 		}
 	}
 	resource := e.dyn.Resource(identityResource).Namespace(target.Namespace)
-	identity, err := resource.Get(ctx, name, metav1.GetOptions{})
+	obj, err := resource.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		e.problems.Delete(problemKey(target, username))
 		return nil
 	}
-
 	if err != nil {
 		return fmt.Errorf("get S3Identity %q: %w", name, err)
+	}
+	identity := &seaweedv1.S3Identity{}
+	if err := fromUnstructured(obj, identity); err != nil {
+		return fmt.Errorf("decode S3Identity %q: %w", name, err)
 	}
 	if !isManaged(identity) {
 		return nil
 	}
-	if identity.GetDeletionTimestamp() == nil {
+	if identity.DeletionTimestamp == nil {
 		if err := resource.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete S3Identity %q: %w", name, err)
 		}
 	}
 	return fmt.Errorf("%w: SeaweedFS is deleting IAM user %q", engine.ErrInProgress, username)
-}
-
-func matchingBucketName(bucket *unstructured.Unstructured) string {
-	name, _, _ := unstructured.NestedString(bucket.Object, "spec", "name")
-	if name == "" {
-		return bucket.GetName()
-	}
-	return name
 }
 
 func (e *Engine) ConnectionURI(ctx context.Context, target engine.Target, _, _ string) (string, error) {
@@ -561,31 +648,62 @@ func (e *Engine) UserProblem(target engine.Target, username string) string {
 }
 
 func (e *Engine) userProblem(ctx context.Context, target engine.Target, username string) string {
-	for _, gvr := range []schema.GroupVersionResource{identityResource, credentialResource} {
-		name := identityName(target, username)
-		if gvr == credentialResource {
-			name = credentialsName(target, username)
-		}
-		obj, err := e.dyn.Resource(gvr).Namespace(target.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return fmt.Sprintf("waiting for %s %q to be created", gvr.Resource, name)
-		}
-		if err != nil {
-			return ""
-		}
-		if reason := readyProblem(obj); reason != "" {
-			return reason
+	identityObj, err := e.dyn.Resource(identityResource).Namespace(target.Namespace).Get(
+		ctx, identityName(target, username), metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return fmt.Sprintf("waiting for %s %q to be created", identityResource.Resource, identityName(target, username))
+	}
+	if err == nil {
+		identity := &seaweedv1.S3Identity{}
+		if err := fromUnstructured(identityObj, identity); err == nil {
+			if reason := identityReadyProblem(identity); reason != "" {
+				return reason
+			}
 		}
 	}
-	for _, gvr := range []schema.GroupVersionResource{policyResource, bindingResource} {
-		list, err := e.dyn.Resource(gvr).Namespace(target.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: usernameLabel + "=" + identityLabel(identityName(target, username)),
-		})
-		if err == nil {
-			for i := range list.Items {
-				if reason := readyProblem(&list.Items[i]); reason != "" {
-					return reason
-				}
+
+	credObj, err := e.dyn.Resource(credentialResource).Namespace(target.Namespace).Get(
+		ctx, credentialsName(target, username), metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return fmt.Sprintf("waiting for %s %q to be created", credentialResource.Resource, credentialsName(target, username))
+	}
+	if err == nil {
+		credentials := &seaweedv1.S3Credentials{}
+		if err := fromUnstructured(credObj, credentials); err == nil {
+			if reason := credentialsReadyProblem(credentials); reason != "" {
+				return reason
+			}
+		}
+	}
+
+	policyList, err := e.dyn.Resource(policyResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: usernameLabel + "=" + identityLabel(identityName(target, username)),
+	})
+	if err == nil {
+		for i := range policyList.Items {
+			policy := &seaweedv1.S3Policy{}
+			if err := fromUnstructured(&policyList.Items[i], policy); err != nil {
+				continue
+			}
+			if reason := policyReadyProblem(policy); reason != "" {
+				return reason
+			}
+		}
+	}
+
+	bindingList, err := e.dyn.Resource(bindingResource).Namespace(target.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: usernameLabel + "=" + identityLabel(identityName(target, username)),
+	})
+	if err == nil {
+		for i := range bindingList.Items {
+			binding := &seaweedv1.S3PolicyBinding{}
+			if err := fromUnstructured(&bindingList.Items[i], binding); err != nil {
+				continue
+			}
+			if reason := bindingReadyProblem(binding); reason != "" {
+				return reason
 			}
 		}
 	}

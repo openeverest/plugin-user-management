@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	seaweedv1 "github.com/seaweedfs/seaweedfs-operator/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,14 +22,26 @@ import (
 
 var target = engine.Target{Namespace: "ns", Instance: "object-store"}
 
+func mustUnstructured(obj runtime.Object) *unstructured.Unstructured {
+	u, err := toUnstructured(obj)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
 func seaweed() *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": seaweedResource.GroupVersion().String(),
-		"kind":       "Seaweed",
-		"metadata": map[string]any{
-			"name": target.Instance, "namespace": target.Namespace, "uid": "seaweed-uid",
+	return mustUnstructured(&seaweedv1.Seaweed{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "Seaweed",
 		},
-	}}
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      target.Instance,
+			Namespace: target.Namespace,
+			UID:       "seaweed-uid",
+		},
+	})
 }
 
 func connectionSecret() *corev1.Secret {
@@ -84,6 +97,17 @@ func desiredUser(grants ...engine.RoleGrant) engine.DesiredUser {
 			Key:  "password",
 		},
 		ManagedCredentials: true,
+	}
+}
+
+func getTyped[T any](t *testing.T, e *Engine, gvr schema.GroupVersionResource, name string, out *T) {
+	t.Helper()
+	obj, err := e.dyn.Resource(gvr).Namespace(target.Namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fromUnstructured(obj, out); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -170,64 +194,41 @@ func TestSyncUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	identity, err := e.dyn.Resource(identityResource).Namespace(target.Namespace).Get(
-		context.Background(), identityName(target, user.Username), metav1.GetOptions{},
-	)
-	if err != nil {
-		t.Fatal(err)
+	identity := &seaweedv1.S3Identity{}
+	getTyped(t, e, identityResource, identityName(target, user.Username), identity)
+	if identity.Spec.Name != identity.Name {
+		t.Fatalf("identity name = %q", identity.Spec.Name)
 	}
-	name, _, _ := unstructured.NestedString(identity.Object, "spec", "name")
-	if name != identity.GetName() {
-		t.Fatalf("identity name = %q", name)
+	if identity.Spec.Account == nil || identity.Spec.Account.DisplayName != user.Username {
+		t.Fatalf("display name = %+v", identity.Spec.Account)
 	}
-	displayName, _, _ := unstructured.NestedString(identity.Object, "spec", "account", "displayName")
-	if displayName != user.Username {
-		t.Fatalf("display name = %q", displayName)
-	}
-	if identity.GetLabels()[managedByLabel] != managedBy {
-		t.Fatalf("identity labels = %v", identity.GetLabels())
+	if identity.Labels[managedByLabel] != managedBy {
+		t.Fatalf("identity labels = %v", identity.Labels)
 	}
 
-	credential, err := e.dyn.Resource(credentialResource).Namespace(target.Namespace).Get(
-		context.Background(), credentialsName(target, user.Username), metav1.GetOptions{},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secretName, _, _ := unstructured.NestedString(credential.Object, "spec", "secretRef", "name")
-	accessField, _, _ := unstructured.NestedString(credential.Object, "spec", "secretRef", "accessKeyField")
-	secretField, _, _ := unstructured.NestedString(credential.Object, "spec", "secretRef", "secretKeyField")
-	if secretName != user.Password.Name || accessField != accessKeyField || secretField != user.Password.Key {
-		t.Fatalf("secretRef = name %q access %q secret %q", secretName, accessField, secretField)
+	credentials := &seaweedv1.S3Credentials{}
+	getTyped(t, e, credentialResource, credentialsName(target, user.Username), credentials)
+	if credentials.Spec.SecretRef.Name != user.Password.Name ||
+		credentials.Spec.SecretRef.AccessKeyField != accessKeyField ||
+		credentials.Spec.SecretRef.SecretKeyField != user.Password.Key {
+		t.Fatalf("secretRef = %+v", credentials.Spec.SecretRef)
 	}
 
-	policy, err := e.dyn.Resource(policyResource).Namespace(target.Namespace).Get(
-		context.Background(), policyName(target, user.Username, user.Roles[0]), metav1.GetOptions{},
-	)
-	if err != nil {
-		t.Fatal(err)
+	policy := &seaweedv1.S3Policy{}
+	getTyped(t, e, policyResource, policyName(target, user.Username, user.Roles[0]), policy)
+	if len(policy.Spec.Statements) != 2 {
+		t.Fatalf("statements = %+v", policy.Spec.Statements)
 	}
-	statements, _, _ := unstructured.NestedSlice(policy.Object, "spec", "statements")
-	if len(statements) != 2 {
-		t.Fatalf("statements = %+v", statements)
-	}
-	resources, _, _ := unstructured.NestedStringSlice(
-		statements[0].(map[string]any), "resources",
-	)
-	if !reflect.DeepEqual(resources, []string{"uploads"}) {
-		t.Fatalf("bucket resources = %v", resources)
+	if !reflect.DeepEqual(policy.Spec.Statements[0].Resources, []string{"uploads"}) {
+		t.Fatalf("bucket resources = %v", policy.Spec.Statements[0].Resources)
 	}
 
-	binding, err := e.dyn.Resource(bindingResource).Namespace(target.Namespace).Get(
-		context.Background(), bindingName(target, user.Username, user.Roles[0]), metav1.GetOptions{},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	subjects, _, _ := unstructured.NestedSlice(binding.Object, "spec", "subjects")
-	subject := subjects[0].(map[string]any)
-	if subject["kind"] != "S3Identity" || subject["name"] != identity.GetName() {
-		t.Fatalf("binding subject = %+v", subject)
+	binding := &seaweedv1.S3PolicyBinding{}
+	getTyped(t, e, bindingResource, bindingName(target, user.Username, user.Roles[0]), binding)
+	if len(binding.Spec.Subjects) != 1 ||
+		binding.Spec.Subjects[0].Kind != seaweedv1.S3SubjectKindIdentity ||
+		binding.Spec.Subjects[0].Name != identity.Name {
+		t.Fatalf("binding subject = %+v", binding.Spec.Subjects)
 	}
 
 	users, err := e.ListUsers(context.Background(), target)
@@ -241,17 +242,20 @@ func TestSyncUsers(t *testing.T) {
 }
 
 func TestSyncRejectsForeignIdentityResource(t *testing.T) {
-	foreign := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": identityResource.GroupVersion().String(),
-		"kind":       "S3Identity",
-		"metadata": map[string]any{
-			"name": identityName(target, "alice"), "namespace": target.Namespace,
+	foreign := mustUnstructured(&seaweedv1.S3Identity{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "S3Identity",
 		},
-		"spec": map[string]any{
-			"seaweedRef": map[string]any{"name": target.Instance},
-			"name":       "alice",
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identityName(target, "alice"),
+			Namespace: target.Namespace,
 		},
-	}}
+		Spec: seaweedv1.S3IdentitySpec{
+			SeaweedRef: seaweedv1.SeaweedReference{Name: target.Instance},
+			Name:       "alice",
+		},
+	})
 	e := newEngine([]runtime.Object{seaweed(), foreign}, credentialsSecret("AKIAALICE00000000001"))
 	err := e.SyncUsers(context.Background(), target, []engine.DesiredUser{
 		desiredUser(engine.RoleGrant{Role: RoleRead, Bucket: "uploads"}),
@@ -294,18 +298,24 @@ func TestDropUserWaitsForOwnedBucket(t *testing.T) {
 }
 
 func TestDropUserWaitsForCrossNamespaceOwnedBucket(t *testing.T) {
-	foreign := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": bucketResource.GroupVersion().String(),
-		"kind":       "Bucket",
-		"metadata": map[string]any{
-			"name": "foreign-uploads", "namespace": "apps",
+	foreign := mustUnstructured(&seaweedv1.Bucket{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "Bucket",
 		},
-		"spec": map[string]any{
-			"clusterRef": map[string]any{"name": target.Instance, "namespace": target.Namespace},
-			"name":       "uploads",
-			"owner":      identityName(target, "alice"),
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foreign-uploads",
+			Namespace: "apps",
 		},
-	}}
+		Spec: seaweedv1.BucketSpec{
+			ClusterRef: &seaweedv1.SeaweedReference{
+				Name:      target.Instance,
+				Namespace: target.Namespace,
+			},
+			Name:  "uploads",
+			Owner: identityName(target, "alice"),
+		},
+	})
 	e := newEngine([]runtime.Object{seaweed(), foreign})
 	err := e.DropUser(context.Background(), target, "alice")
 	if !errors.Is(err, engine.ErrInProgress) || !strings.Contains(err.Error(), `bucket "uploads"`) {
@@ -340,21 +350,22 @@ func TestBucketLifecycle(t *testing.T) {
 	if err := e.SyncBucket(context.Background(), target, desired); !errors.Is(err, engine.ErrInProgress) {
 		t.Fatalf("initial SyncBucket error = %v, want ErrInProgress", err)
 	}
-	obj, err := e.dyn.Resource(bucketResource).Namespace(target.Namespace).Get(
-		context.Background(), bucketName(target, desired.Name), metav1.GetOptions{},
-	)
+	bucket := &seaweedv1.Bucket{}
+	getTyped(t, e, bucketResource, bucketName(target, desired.Name), bucket)
+	if bucket.Spec.Owner != identityName(target, desired.Owner) {
+		t.Fatalf("bucket owner = %q, want %q", bucket.Spec.Owner, identityName(target, desired.Owner))
+	}
+	bucket.Status = seaweedv1.BucketStatus{
+		Phase:              seaweedv1.BucketPhaseReady,
+		ObservedGeneration: bucket.Generation,
+		OwnerIdentity:      bucket.Spec.Owner,
+	}
+	updated, err := toUnstructured(bucket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, _, _ := unstructured.NestedString(obj.Object, "spec", "owner")
-	if owner != identityName(target, desired.Owner) {
-		t.Fatalf("bucket owner = %q, want %q", owner, identityName(target, desired.Owner))
-	}
-	obj.Object["status"] = map[string]any{
-		"phase": "Ready", "observedGeneration": int64(0), "ownerIdentity": owner,
-	}
 	if _, err := e.dyn.Resource(bucketResource).Namespace(target.Namespace).Update(
-		context.Background(), obj, metav1.UpdateOptions{},
+		context.Background(), updated, metav1.UpdateOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -379,8 +390,11 @@ func TestBucketLifecycle(t *testing.T) {
 			continue
 		}
 		value := update.GetObject().(*unstructured.Unstructured)
-		policy, _, _ := unstructured.NestedString(value.Object, "spec", "reclaimPolicy")
-		if policy == "Delete" {
+		updatedBucket := &seaweedv1.Bucket{}
+		if err := fromUnstructured(value, updatedBucket); err != nil {
+			t.Fatal(err)
+		}
+		if updatedBucket.Spec.ReclaimPolicy == seaweedv1.BucketReclaimDelete {
 			foundDeletePolicy = true
 		}
 	}
@@ -395,21 +409,23 @@ func TestBucketAlreadyExistsIsNotTakenOver(t *testing.T) {
 	if err := e.SyncBucket(context.Background(), target, desired); !errors.Is(err, engine.ErrInProgress) {
 		t.Fatalf("initial SyncBucket error = %v", err)
 	}
-	obj, err := e.dyn.Resource(bucketResource).Namespace(target.Namespace).Get(
-		context.Background(), bucketName(target, desired.Name), metav1.GetOptions{},
-	)
+	bucket := &seaweedv1.Bucket{}
+	getTyped(t, e, bucketResource, bucketName(target, desired.Name), bucket)
+	bucket.Status = seaweedv1.BucketStatus{
+		Phase:              seaweedv1.BucketPhaseFailed,
+		ObservedGeneration: bucket.Generation,
+		Conditions: []metav1.Condition{{
+			Type:    seaweedv1.BucketConditionBucketAlreadyExists,
+			Status:  metav1.ConditionTrue,
+			Message: "bucket already exists",
+		}},
+	}
+	updated, err := toUnstructured(bucket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj.Object["status"] = map[string]any{
-		"phase": "Failed", "observedGeneration": int64(0),
-		"message": "bucket already exists",
-		"conditions": []any{map[string]any{
-			"type": "BucketAlreadyExists", "status": "True", "message": "bucket already exists",
-		}},
-	}
 	if _, err := e.dyn.Resource(bucketResource).Namespace(target.Namespace).Update(
-		context.Background(), obj, metav1.UpdateOptions{},
+		context.Background(), updated, metav1.UpdateOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -436,12 +452,55 @@ func TestPendingReasonIncludesPolicyFailureAndGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range []struct {
-		gvr  schema.GroupVersionResource
-		name string
+		gvr      schema.GroupVersionResource
+		name     string
+		setReady func(*unstructured.Unstructured)
 	}{
-		{identityResource, identityName(target, user.Username)},
-		{credentialResource, credentialsName(target, user.Username)},
-		{bindingResource, bindingName(target, user.Username, user.Roles[0])},
+		{identityResource, identityName(target, user.Username), func(obj *unstructured.Unstructured) {
+			identity := &seaweedv1.S3Identity{}
+			if err := fromUnstructured(obj, identity); err != nil {
+				t.Fatal(err)
+			}
+			identity.Generation = 1
+			identity.Status = seaweedv1.S3IdentityStatus{
+				Phase: seaweedv1.S3PhaseReady, ObservedGeneration: 1,
+			}
+			ready, err := toUnstructured(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj.Object = ready.Object
+		}},
+		{credentialResource, credentialsName(target, user.Username), func(obj *unstructured.Unstructured) {
+			credentials := &seaweedv1.S3Credentials{}
+			if err := fromUnstructured(obj, credentials); err != nil {
+				t.Fatal(err)
+			}
+			credentials.Generation = 1
+			credentials.Status = seaweedv1.S3CredentialsStatus{
+				Phase: seaweedv1.S3PhaseReady, ObservedGeneration: 1,
+			}
+			ready, err := toUnstructured(credentials)
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj.Object = ready.Object
+		}},
+		{bindingResource, bindingName(target, user.Username, user.Roles[0]), func(obj *unstructured.Unstructured) {
+			binding := &seaweedv1.S3PolicyBinding{}
+			if err := fromUnstructured(obj, binding); err != nil {
+				t.Fatal(err)
+			}
+			binding.Generation = 1
+			binding.Status = seaweedv1.S3PolicyBindingStatus{
+				Phase: seaweedv1.S3PhaseReady, ObservedGeneration: 1,
+			}
+			ready, err := toUnstructured(binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj.Object = ready.Object
+		}},
 	} {
 		obj, err := e.dyn.Resource(item.gvr).Namespace(target.Namespace).Get(
 			context.Background(), item.name, metav1.GetOptions{},
@@ -449,32 +508,31 @@ func TestPendingReasonIncludesPolicyFailureAndGeneration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		obj.SetGeneration(1)
-		obj.Object["status"] = map[string]any{
-			"phase": "Ready", "observedGeneration": int64(1),
-		}
+		item.setReady(obj)
 		if _, err := e.dyn.Resource(item.gvr).Namespace(target.Namespace).Update(
 			context.Background(), obj, metav1.UpdateOptions{},
 		); err != nil {
 			t.Fatal(err)
 		}
 	}
-	policy, err := e.dyn.Resource(policyResource).Namespace(target.Namespace).Get(
-		context.Background(), policyName(target, user.Username, user.Roles[0]), metav1.GetOptions{},
-	)
+	policy := &seaweedv1.S3Policy{}
+	getTyped(t, e, policyResource, policyName(target, user.Username, user.Roles[0]), policy)
+	policy.Generation = 2
+	policy.Status = seaweedv1.S3PolicyStatus{
+		Phase:              seaweedv1.S3PhaseFailed,
+		ObservedGeneration: 2,
+		Conditions: []metav1.Condition{{
+			Type:    seaweedv1.S3ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Message: "IAM policy was rejected",
+		}},
+	}
+	updated, err := toUnstructured(policy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy.SetGeneration(2)
-	policy.Object["status"] = map[string]any{
-		"phase":              "Failed",
-		"observedGeneration": int64(2),
-		"conditions": []any{map[string]any{
-			"type": "Ready", "status": "False", "message": "IAM policy was rejected",
-		}},
-	}
 	if _, err := e.dyn.Resource(policyResource).Namespace(target.Namespace).Update(
-		context.Background(), policy, metav1.UpdateOptions{},
+		context.Background(), updated, metav1.UpdateOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -482,14 +540,17 @@ func TestPendingReasonIncludesPolicyFailureAndGeneration(t *testing.T) {
 		t.Fatalf("policy failure = %q", reason)
 	}
 
-	condition := policy.Object["status"].(map[string]any)
-	condition["phase"] = "Ready"
-	condition["observedGeneration"] = int64(1)
-	condition["conditions"] = []any{map[string]any{
-		"type": "Ready", "status": "True", "message": "",
+	policy.Status.Phase = seaweedv1.S3PhaseReady
+	policy.Status.ObservedGeneration = 1
+	policy.Status.Conditions = []metav1.Condition{{
+		Type: seaweedv1.S3ConditionReady, Status: metav1.ConditionTrue,
 	}}
+	updated, err = toUnstructured(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := e.dyn.Resource(policyResource).Namespace(target.Namespace).Update(
-		context.Background(), policy, metav1.UpdateOptions{},
+		context.Background(), updated, metav1.UpdateOptions{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -499,17 +560,20 @@ func TestPendingReasonIncludesPolicyFailureAndGeneration(t *testing.T) {
 }
 
 func TestForeignIdentityIsListed(t *testing.T) {
-	foreign := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": identityResource.GroupVersion().String(),
-		"kind":       "S3Identity",
-		"metadata": map[string]any{
-			"name": "alice", "namespace": target.Namespace,
+	foreign := mustUnstructured(&seaweedv1.S3Identity{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "S3Identity",
 		},
-		"spec": map[string]any{
-			"seaweedRef": map[string]any{"name": target.Instance},
-			"name":       "alice",
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "alice",
+			Namespace: target.Namespace,
 		},
-	}}
+		Spec: seaweedv1.S3IdentitySpec{
+			SeaweedRef: seaweedv1.SeaweedReference{Name: target.Instance},
+			Name:       "alice",
+		},
+	})
 	e := newEngine([]runtime.Object{seaweed(), foreign})
 	users, err := e.ListUsers(context.Background(), target)
 	if err != nil {

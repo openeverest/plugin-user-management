@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"strings"
 
+	seaweedv1 "github.com/seaweedfs/seaweedfs-operator/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/openeverest/plugin-user-management/backend/internal/engine"
@@ -33,15 +35,15 @@ const (
 )
 
 var (
-	seaweedResource    = schema.GroupVersionResource{Group: "seaweed.seaweedfs.com", Version: "v1", Resource: "seaweeds"}
-	identityResource   = schema.GroupVersionResource{Group: "seaweed.seaweedfs.com", Version: "v1", Resource: "s3identities"}
+	seaweedResource    = schema.GroupVersionResource{Group: seaweedv1.GroupVersion.Group, Version: seaweedv1.GroupVersion.Version, Resource: "seaweeds"}
+	identityResource   = schema.GroupVersionResource{Group: seaweedv1.GroupVersion.Group, Version: seaweedv1.GroupVersion.Version, Resource: "s3identities"}
 	credentialResource = schema.GroupVersionResource{
-		Group: "seaweed.seaweedfs.com", Version: "v1", Resource: "s3credentials",
+		Group: seaweedv1.GroupVersion.Group, Version: seaweedv1.GroupVersion.Version, Resource: "s3credentials",
 	}
-	policyResource  = schema.GroupVersionResource{Group: "seaweed.seaweedfs.com", Version: "v1", Resource: "s3policies"}
-	bucketResource  = schema.GroupVersionResource{Group: "seaweed.seaweedfs.com", Version: "v1", Resource: "buckets"}
+	policyResource  = schema.GroupVersionResource{Group: seaweedv1.GroupVersion.Group, Version: seaweedv1.GroupVersion.Version, Resource: "s3policies"}
+	bucketResource  = schema.GroupVersionResource{Group: seaweedv1.GroupVersion.Group, Version: seaweedv1.GroupVersion.Version, Resource: "buckets"}
 	bindingResource = schema.GroupVersionResource{
-		Group: "seaweed.seaweedfs.com", Version: "v1", Resource: "s3policybindings",
+		Group: seaweedv1.GroupVersion.Group, Version: seaweedv1.GroupVersion.Version, Resource: "s3policybindings",
 	}
 )
 
@@ -84,236 +86,308 @@ func identityLabel(name string) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-func ownerReference(obj *unstructured.Unstructured) map[string]any {
-	return map[string]any{
-		"apiVersion": obj.GetAPIVersion(),
-		"kind":       obj.GetKind(),
-		"name":       obj.GetName(),
-		"uid":        string(obj.GetUID()),
+func ownerReference(obj metav1.Object, apiVersion, kind string) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: apiVersion,
+		Kind:       kind,
+		Name:       obj.GetName(),
+		UID:        obj.GetUID(),
 	}
 }
 
-func identityObject(target engine.Target, seaweed *unstructured.Unstructured, username string) *unstructured.Unstructured {
+func managedLabels(target engine.Target, identityName string) map[string]string {
+	labels := map[string]string{
+		managedByLabel: managedBy,
+		instanceLabel:  target.Instance,
+	}
+	if identityName != "" {
+		labels[usernameLabel] = identityLabel(identityName)
+	}
+	return labels
+}
+
+func toUnstructured(obj runtime.Object) (*unstructured.Unstructured, error) {
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, err
+	}
+	return &unstructured.Unstructured{Object: raw}, nil
+}
+
+func fromUnstructured(u *unstructured.Unstructured, out any) error {
+	return runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, out)
+}
+
+func identityObject(target engine.Target, seaweed *seaweedv1.Seaweed, username string) *seaweedv1.S3Identity {
 	name := identityName(target, username)
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": identityResource.GroupVersion().String(),
-		"kind":       "S3Identity",
-		"metadata": map[string]any{
-			"name":      name,
-			"namespace": target.Namespace,
-			"labels": map[string]any{
-				managedByLabel: managedBy,
-				instanceLabel:  target.Instance,
-				usernameLabel:  identityLabel(name),
+	return &seaweedv1.S3Identity{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "S3Identity",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: target.Namespace,
+			Labels:    managedLabels(target, name),
+			Annotations: map[string]string{
+				usernameAnnotation: username,
 			},
-			"annotations":     map[string]any{usernameAnnotation: username},
-			"ownerReferences": []any{ownerReference(seaweed)},
+			OwnerReferences: []metav1.OwnerReference{
+				ownerReference(seaweed, seaweedv1.GroupVersion.String(), "Seaweed"),
+			},
 		},
-		"spec": map[string]any{
-			"seaweedRef": map[string]any{"name": target.Instance},
-			"name":       name,
-			"account":    map[string]any{"displayName": username},
+		Spec: seaweedv1.S3IdentitySpec{
+			SeaweedRef: seaweedv1.SeaweedReference{Name: target.Instance},
+			Name:       name,
+			Account:    &seaweedv1.S3Account{DisplayName: username},
 		},
-	}}
+	}
 }
 
 func credentialsObject(
 	target engine.Target,
-	identity *unstructured.Unstructured,
+	identity *seaweedv1.S3Identity,
 	user engine.DesiredUser,
-) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": credentialResource.GroupVersion().String(),
-		"kind":       "S3Credentials",
-		"metadata": map[string]any{
-			"name":      credentialsName(target, user.Username),
-			"namespace": target.Namespace,
-			"labels": map[string]any{
-				managedByLabel: managedBy,
-				instanceLabel:  target.Instance,
-				usernameLabel:  identityLabel(identity.GetName()),
-			},
-			"ownerReferences": []any{ownerReference(identity)},
+) *seaweedv1.S3Credentials {
+	return &seaweedv1.S3Credentials{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "S3Credentials",
 		},
-		"spec": map[string]any{
-			"seaweedRef":  map[string]any{"name": target.Instance},
-			"identityRef": map[string]any{"name": identity.GetName()},
-			"secretRef": map[string]any{
-				"name":           user.Password.Name,
-				"accessKeyField": accessKeyField,
-				"secretKeyField": user.Password.Key,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      credentialsName(target, user.Username),
+			Namespace: target.Namespace,
+			Labels:    managedLabels(target, identity.Name),
+			OwnerReferences: []metav1.OwnerReference{
+				ownerReference(identity, seaweedv1.GroupVersion.String(), "S3Identity"),
 			},
 		},
-	}}
+		Spec: seaweedv1.S3CredentialsSpec{
+			SeaweedRef:  seaweedv1.SeaweedReference{Name: target.Instance},
+			IdentityRef: seaweedv1.S3IdentityRef{Name: identity.Name},
+			SecretRef: seaweedv1.S3SecretRef{
+				Name:           user.Password.Name,
+				AccessKeyField: accessKeyField,
+				SecretKeyField: user.Password.Key,
+			},
+		},
+	}
 }
 
 func policyObject(
 	target engine.Target,
-	identity *unstructured.Unstructured,
+	identity *seaweedv1.S3Identity,
 	grant engine.RoleGrant,
-) *unstructured.Unstructured {
-	name := policyName(target, identityUsername(identity), grant)
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": policyResource.GroupVersion().String(),
-		"kind":       "S3Policy",
-		"metadata": map[string]any{
-			"name":      name,
-			"namespace": target.Namespace,
-			"labels": map[string]any{
-				managedByLabel: managedBy,
-				instanceLabel:  target.Instance,
-				usernameLabel:  identityLabel(identity.GetName()),
-			},
-			"annotations": map[string]any{
-				identityAnnotation: identity.GetName(),
+) *seaweedv1.S3Policy {
+	username := identityUsername(identity)
+	name := policyName(target, username, grant)
+	return &seaweedv1.S3Policy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "S3Policy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: target.Namespace,
+			Labels:    managedLabels(target, identity.Name),
+			Annotations: map[string]string{
+				identityAnnotation: identity.Name,
 				roleAnnotation:     grant.Role,
 				bucketAnnotation:   grant.Bucket,
 			},
-			"ownerReferences": []any{ownerReference(identity)},
+			OwnerReferences: []metav1.OwnerReference{
+				ownerReference(identity, seaweedv1.GroupVersion.String(), "S3Identity"),
+			},
 		},
-		"spec": map[string]any{
-			"seaweedRef": map[string]any{"name": target.Instance},
-			"statements": policyStatements(grant),
+		Spec: seaweedv1.S3PolicySpec{
+			SeaweedRef: seaweedv1.SeaweedReference{Name: target.Instance},
+			Statements: policyStatements(grant),
 		},
-	}}
+	}
 }
 
 func bindingObject(
 	target engine.Target,
-	identity *unstructured.Unstructured,
+	identity *seaweedv1.S3Identity,
 	grant engine.RoleGrant,
-	policy *unstructured.Unstructured,
-) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": bindingResource.GroupVersion().String(),
-		"kind":       "S3PolicyBinding",
-		"metadata": map[string]any{
-			"name":      bindingName(target, identityUsername(identity), grant),
-			"namespace": target.Namespace,
-			"labels": map[string]any{
-				managedByLabel: managedBy,
-				instanceLabel:  target.Instance,
-				usernameLabel:  identityLabel(identity.GetName()),
-			},
-			"annotations": map[string]any{
-				identityAnnotation: identity.GetName(),
+	policy *seaweedv1.S3Policy,
+) *seaweedv1.S3PolicyBinding {
+	username := identityUsername(identity)
+	return &seaweedv1.S3PolicyBinding{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "S3PolicyBinding",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bindingName(target, username, grant),
+			Namespace: target.Namespace,
+			Labels:    managedLabels(target, identity.Name),
+			Annotations: map[string]string{
+				identityAnnotation: identity.Name,
 				roleAnnotation:     grant.Role,
 				bucketAnnotation:   grant.Bucket,
 			},
-			"ownerReferences": []any{ownerReference(identity)},
+			OwnerReferences: []metav1.OwnerReference{
+				ownerReference(identity, seaweedv1.GroupVersion.String(), "S3Identity"),
+			},
 		},
-		"spec": map[string]any{
-			"seaweedRef": map[string]any{"name": target.Instance},
-			"policyRef":  map[string]any{"name": policy.GetName()},
-			"subjects": []any{map[string]any{
-				"kind": "S3Identity",
-				"name": identity.GetName(),
+		Spec: seaweedv1.S3PolicyBindingSpec{
+			SeaweedRef: seaweedv1.SeaweedReference{Name: target.Instance},
+			PolicyRef:  seaweedv1.S3PolicyRef{Name: policy.Name},
+			Subjects: []seaweedv1.S3Subject{{
+				Kind: seaweedv1.S3SubjectKindIdentity,
+				Name: identity.Name,
 			}},
 		},
-	}}
+	}
 }
 
 func bucketObject(
 	target engine.Target,
-	seaweed *unstructured.Unstructured,
+	seaweed *seaweedv1.Seaweed,
 	bucket engine.DesiredBucket,
-) *unstructured.Unstructured {
+) *seaweedv1.Bucket {
 	owner := ""
 	if bucket.Owner != "" {
 		owner = identityName(target, bucket.Owner)
 	}
-	spec := map[string]any{
-		"clusterRef":    map[string]any{"name": target.Instance},
-		"name":          bucket.Name,
-		"reclaimPolicy": "Retain",
-	}
-	if owner != "" {
-		spec["owner"] = owner
-	}
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": bucketResource.GroupVersion().String(),
-		"kind":       "Bucket",
-		"metadata": map[string]any{
-			"name":      bucketName(target, bucket.Name),
-			"namespace": target.Namespace,
-			"labels": map[string]any{
+	return &seaweedv1.Bucket{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: seaweedv1.GroupVersion.String(),
+			Kind:       "Bucket",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bucketName(target, bucket.Name),
+			Namespace: target.Namespace,
+			Labels: map[string]string{
 				managedByLabel: managedBy,
 				instanceLabel:  target.Instance,
 			},
-			"annotations":     map[string]any{usernameAnnotation: bucket.Owner},
-			"ownerReferences": []any{ownerReference(seaweed)},
+			Annotations: map[string]string{
+				usernameAnnotation: bucket.Owner,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				ownerReference(seaweed, seaweedv1.GroupVersion.String(), "Seaweed"),
+			},
 		},
-		"spec": spec,
-	}}
+		Spec: seaweedv1.BucketSpec{
+			ClusterRef:    &seaweedv1.SeaweedReference{Name: target.Instance},
+			Name:          bucket.Name,
+			ReclaimPolicy: seaweedv1.BucketReclaimRetain,
+			Owner:         owner,
+		},
+	}
 }
 
-func identityUsername(identity *unstructured.Unstructured) string {
+func identityUsername(identity *seaweedv1.S3Identity) string {
 	if isManaged(identity) {
-		if username := identity.GetAnnotations()[usernameAnnotation]; username != "" {
+		if username := identity.Annotations[usernameAnnotation]; username != "" {
 			return username
 		}
 	}
-	name, _, _ := unstructured.NestedString(identity.Object, "spec", "name")
-	return name
-}
-
-func observedPhase(obj *unstructured.Unstructured) string {
-	phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
-	return phase
-}
-
-func readyProblem(obj *unstructured.Unstructured) string {
-	observed, _, _ := unstructured.NestedInt64(obj.Object, "status", "observedGeneration")
-	if observed != obj.GetGeneration() {
-		return fmt.Sprintf("waiting for %s %q generation %d to be observed", obj.GetKind(), obj.GetName(), obj.GetGeneration())
+	if identity.Spec.Name != "" {
+		return identity.Spec.Name
 	}
-	switch observedPhase(obj) {
-	case "Ready":
+	return identity.Name
+}
+
+func iamReadyProblem(kind, name string, generation, observed int64, phase seaweedv1.S3Phase, conditions []metav1.Condition) string {
+	if observed != generation {
+		return fmt.Sprintf("waiting for %s %q generation %d to be observed", kind, name, generation)
+	}
+	switch phase {
+	case seaweedv1.S3PhaseReady:
 		return ""
-	case "Failed":
-		message, _, _ := unstructured.NestedString(obj.Object, "status", "message")
-		conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-		for _, raw := range conditions {
-			condition, ok := raw.(map[string]any)
-			if ok && condition["type"] == "Ready" && condition["status"] == "False" && condition["message"] != "" {
-				message, _ = condition["message"].(string)
+	case seaweedv1.S3PhaseFailed:
+		message := ""
+		for _, condition := range conditions {
+			if condition.Type == seaweedv1.S3ConditionReady &&
+				condition.Status == metav1.ConditionFalse &&
+				condition.Message != "" {
+				message = condition.Message
 				break
 			}
 		}
 		if message == "" {
-			message = fmt.Sprintf("%s reported Failed", obj.GetKind())
+			message = fmt.Sprintf("%s reported Failed", kind)
 		}
 		return message
 	default:
-		return fmt.Sprintf("waiting for %s %q to become Ready", obj.GetKind(), obj.GetName())
+		return fmt.Sprintf("waiting for %s %q to become Ready", kind, name)
 	}
 }
 
-func matchingIdentity(obj *unstructured.Unstructured, target engine.Target) bool {
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "seaweedRef", "name")
-	return name == target.Instance
+func identityReadyProblem(identity *seaweedv1.S3Identity) string {
+	return iamReadyProblem(
+		"S3Identity", identity.Name, identity.Generation, identity.Status.ObservedGeneration,
+		identity.Status.Phase, identity.Status.Conditions,
+	)
 }
 
-func matchingBucket(obj *unstructured.Unstructured, target engine.Target) bool {
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "seaweedRef", "name")
-	namespace, _, _ := unstructured.NestedString(obj.Object, "spec", "seaweedRef", "namespace")
-	if name == "" {
-		name, _, _ = unstructured.NestedString(obj.Object, "spec", "clusterRef", "name")
-		namespace, _, _ = unstructured.NestedString(obj.Object, "spec", "clusterRef", "namespace")
+func credentialsReadyProblem(credentials *seaweedv1.S3Credentials) string {
+	return iamReadyProblem(
+		"S3Credentials", credentials.Name, credentials.Generation, credentials.Status.ObservedGeneration,
+		credentials.Status.Phase, credentials.Status.Conditions,
+	)
+}
+
+func policyReadyProblem(policy *seaweedv1.S3Policy) string {
+	return iamReadyProblem(
+		"S3Policy", policy.Name, policy.Generation, policy.Status.ObservedGeneration,
+		policy.Status.Phase, policy.Status.Conditions,
+	)
+}
+
+func bindingReadyProblem(binding *seaweedv1.S3PolicyBinding) string {
+	return iamReadyProblem(
+		"S3PolicyBinding", binding.Name, binding.Generation, binding.Status.ObservedGeneration,
+		binding.Status.Phase, binding.Status.Conditions,
+	)
+}
+
+func bucketReadyProblem(bucket *seaweedv1.Bucket) string {
+	if bucket.Status.ObservedGeneration != bucket.Generation {
+		return fmt.Sprintf("waiting for Bucket %q generation %d to be observed", bucket.Name, bucket.Generation)
 	}
+	switch bucket.Status.Phase {
+	case seaweedv1.BucketPhaseReady:
+		return ""
+	case seaweedv1.BucketPhaseFailed:
+		message := ""
+		for _, condition := range bucket.Status.Conditions {
+			if condition.Type == seaweedv1.BucketConditionReady &&
+				condition.Status == metav1.ConditionFalse &&
+				condition.Message != "" {
+				message = condition.Message
+				break
+			}
+		}
+		if message == "" {
+			message = "Bucket reported Failed"
+		}
+		return message
+	default:
+		return fmt.Sprintf("waiting for Bucket %q to become Ready", bucket.Name)
+	}
+}
+
+func matchingIdentity(identity *seaweedv1.S3Identity, target engine.Target) bool {
+	return identity.Spec.SeaweedRef.Name == target.Instance
+}
+
+func matchingBucket(bucket *seaweedv1.Bucket, target engine.Target) bool {
+	ref := bucket.Spec.ClusterReference()
+	namespace := ref.Namespace
 	if namespace == "" {
-		namespace = obj.GetNamespace()
+		namespace = bucket.Namespace
 	}
-	return name == target.Instance && namespace == target.Namespace
+	return ref.Name == target.Instance && namespace == target.Namespace
 }
 
-func bucketAlreadyExists(obj *unstructured.Unstructured) bool {
-	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	for _, raw := range conditions {
-		condition, ok := raw.(map[string]any)
-		if ok &&
-			condition["type"] == "BucketAlreadyExists" &&
-			condition["status"] == "True" {
+func bucketAlreadyExists(bucket *seaweedv1.Bucket) bool {
+	for _, condition := range bucket.Status.Conditions {
+		if condition.Type == seaweedv1.BucketConditionBucketAlreadyExists &&
+			condition.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
